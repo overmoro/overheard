@@ -47,10 +47,10 @@ def transcribe_audio(
     import soundfile as sf
     audio_check, _ = sf.read(audio_path)
     rms = float(np.sqrt(np.mean(audio_check ** 2)))
-    if rms < 0.001:
+    if rms < 0.0001:
         raise RuntimeError(
-            "Audio appears silent — check your recording device in Preferences. "
-            "The aggregate device (Meeting Capture) must be selected."
+            f"Audio appears silent (RMS={rms:.6f}). "
+            "Set your Mac system output to 'Meeting Monitor' so audio routes through BlackHole."
         )
 
     # ctranslate2 (WhisperX backend) doesn't support MPS yet — use CPU
