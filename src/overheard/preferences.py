@@ -181,6 +181,9 @@ class _PreferencesDelegate(NSObject):
 
     # ---- Output Folder -----------------------------------------------------
 
+    def toggleKeepRecordings_(self, sender):
+        cfg.set_value("keep_recordings", bool(sender.state()))
+
     def browseOutputFolder_(self, sender):
         panel = NSOpenPanel.openPanel()
         panel.setCanChooseFiles_(False)
@@ -376,3 +379,14 @@ class PreferencesWindow:
 
         self._delegate._output_status = _make_status(20, y)
         cv.addSubview_(self._delegate._output_status)
+        y -= 30
+
+        from AppKit import NSButton as _NSButton
+        keep_btn = _NSButton.alloc().initWithFrame_(NSMakeRect(20, y, 300, 20))
+        keep_btn.setButtonType_(3)  # NSSwitchButton / checkbox
+        keep_btn.setTitle_("Keep audio recordings after transcription")
+        keep_btn.setState_(1 if cfg.get("keep_recordings", False) else 0)
+        keep_btn.setTarget_(self._delegate)
+        keep_btn.setAction_("toggleKeepRecordings:")
+        cv.addSubview_(keep_btn)
+        self._delegate._keep_recordings_btn = keep_btn

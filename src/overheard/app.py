@@ -115,7 +115,11 @@ class TranscriberApp(rumps.App):
                 self._set_state("idle", f"✗ {msg}")
                 rumps.notification("Overheard", "Error", str(e))
             finally:
-                os.unlink(tmp.name)
+                if cfg.get("keep_recordings", False):
+                    audio_path = output_path.replace(".md", ".wav")
+                    os.rename(tmp.name, audio_path)
+                else:
+                    os.unlink(tmp.name)
 
         threading.Thread(target=run, daemon=True).start()
 
