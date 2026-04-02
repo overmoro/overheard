@@ -1,12 +1,19 @@
 """WhisperX transcription with pyannote diarization."""
 
 import os
+import warnings
 from datetime import datetime
 from pathlib import Path
 
+# torchcodec is incompatible with PyTorch 2.8 — suppress the wall of warnings at import
+warnings.filterwarnings("ignore", message="torchcodec is not installed correctly")
+
+from overheard import config as cfg
 
 WHISPER_MODEL = "large-v3"
-OUTPUT_DIR = Path.home() / "meeting-transcripts"
+
+# Read output directory from config; fall back to ~/meeting-transcripts
+OUTPUT_DIR = Path(cfg.get("output_dir", str(Path.home() / "meeting-transcripts")))
 
 
 def transcribe_audio(
@@ -71,7 +78,10 @@ def transcribe_audio(
     diarize_model = whisperx.DiarizationPipeline(
         use_auth_token=hf_token, device=diarize_device
     )
-    diarize_segments = diarize_model(audio_path)
+    # Pre-load audio as tensor to bypass torchcodec (broken on PyTorch 2.8+)
+    import torchaudio
+    waveform, sample_rate = torchaudio.load(audio_path)
+    diarize_segments = diarize_model({"waveform": waveform, "sample_rate": sample_rate})
     result = whisperx.assign_word_speakers(diarize_segments, result)
 
     if status_callback:

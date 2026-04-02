@@ -1,6 +1,7 @@
 """Overheard — menu bar application."""
 
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -9,8 +10,15 @@ from pathlib import Path
 
 import rumps
 
+from overheard import config as cfg
 from overheard.audio import Recorder, find_recording_device, DEFAULT_DEVICE_NAME
-from overheard.transcribe import transcribe_audio, OUTPUT_DIR
+from overheard.transcribe import transcribe_audio, WHISPER_MODEL
+
+
+def _output_dir() -> Path:
+    """Return the current output directory from config (re-read each time so
+    Preferences changes take effect without restarting the app)."""
+    return Path(cfg.get("output_dir", str(Path.home() / "meeting-transcripts")))
 
 
 class TranscriberApp(rumps.App):
@@ -18,6 +26,7 @@ class TranscriberApp(rumps.App):
         super().__init__("Overheard", icon=None, title="\U0001f3a4")
         self.recording = False
         self.recorder: Recorder | None = None
+        self._prefs_window = None  # lazy-init to avoid AppKit startup issues
 
     @rumps.clicked("Start Recording")
     def start_recording(self, sender):
@@ -30,7 +39,7 @@ class TranscriberApp(rumps.App):
             rumps.notification(
                 "Transcriber",
                 "No audio device found",
-                f"Create an Aggregate Device named '{DEFAULT_DEVICE_NAME}' in Audio MIDI Setup.",
+                f"Open Preferences to create an Aggregate Device named '{DEFAULT_DEVICE_NAME}'.",
             )
             return
 
@@ -61,10 +70,12 @@ class TranscriberApp(rumps.App):
         tmp.close()
         self.recorder = None
 
-        # Output path
+        # Build output path — read from config at run time
+        output_dir = _output_dir()
+        output_dir.mkdir(parents=True, exist_ok=True)
         now = datetime.now()
         filename = now.strftime("%Y-%m-%d_%H%M") + "_meeting.md"
-        output_path = str(OUTPUT_DIR / filename)
+        output_path = str(output_dir / filename)
 
         def update_status(msg):
             self.title = f"\u23f3 {msg}"
@@ -73,6 +84,7 @@ class TranscriberApp(rumps.App):
             try:
                 transcribe_audio(tmp.name, output_path, status_callback=update_status)
                 self.title = "\U0001f3a4"
+                subprocess.Popen(["afplay", "/System/Library/Sounds/Glass.aiff"])
                 rumps.notification("Overheard", "Done", f"Saved: {filename}")
             except Exception as e:
                 self.title = "\U0001f3a4"
@@ -84,16 +96,26 @@ class TranscriberApp(rumps.App):
 
     @rumps.clicked("Open Transcripts")
     def open_transcripts(self, _):
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        os.system(f'open "{OUTPUT_DIR}"')
+        d = _output_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        os.system(f'open "{d}"')
+
+    @rumps.clicked("Preferences...")
+    def open_preferences(self, _):
+        # Import here so AppKit is initialised inside the rumps run loop
+        from overheard.preferences import PreferencesWindow
+        if self._prefs_window is None:
+            self._prefs_window = PreferencesWindow()
+        self._prefs_window.show()
 
 
 def main():
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    _output_dir().mkdir(parents=True, exist_ok=True)
 
     if not os.environ.get("HF_TOKEN"):
         print("Warning: HF_TOKEN not set. Diarization will fail.", file=sys.stderr)
         print("Set it with: export HF_TOKEN=your_token_here", file=sys.stderr)
+        print("Or open Preferences... from the menu bar icon.", file=sys.stderr)
 
     app = TranscriberApp()
     app.run()

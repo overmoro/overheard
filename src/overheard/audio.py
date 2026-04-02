@@ -1,6 +1,9 @@
 """Audio device discovery and recording."""
 
+import os
+import subprocess
 import sys
+import tempfile
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
@@ -80,3 +83,191 @@ class Recorder:
     def save(self, audio: np.ndarray, path: str) -> str:
         sf.write(path, audio, self.sample_rate)
         return path
+
+
+# ---------------------------------------------------------------------------
+# CoreAudio device creation
+# ---------------------------------------------------------------------------
+
+# Swift snippet that creates an Aggregate Device named "Meeting Capture"
+# combining BlackHole 2ch (loopback) + MacBook Pro Microphone.
+_CREATE_AGGREGATE_SWIFT = """\
+import CoreAudio
+import Foundation
+
+var propSize: UInt32 = 0
+var prop = AudioObjectPropertyAddress(
+    mSelector: kAudioHardwarePropertyDevices,
+    mScope: kAudioObjectPropertyScopeGlobal,
+    mElement: kAudioObjectPropertyElementMain
+)
+AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &prop, 0, nil, &propSize)
+let deviceCount = Int(propSize) / MemoryLayout<AudioDeviceID>.size
+var deviceIDs = [AudioDeviceID](repeating: 0, count: deviceCount)
+AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &prop, 0, nil, &propSize, &deviceIDs)
+
+func deviceUID(_ id: AudioDeviceID) -> String {
+    var uidProp = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyDeviceUID,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var uidRef: CFString = "" as CFString
+    var sz = UInt32(MemoryLayout<CFString>.size)
+    AudioObjectGetPropertyData(id, &uidProp, 0, nil, &sz, &uidRef)
+    return uidRef as String
+}
+
+func deviceName(_ id: AudioDeviceID) -> String {
+    var nameProp = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyDeviceNameCFString,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var nameRef: CFString = "" as CFString
+    var sz = UInt32(MemoryLayout<CFString>.size)
+    AudioObjectGetPropertyData(id, &nameProp, 0, nil, &sz, &nameRef)
+    return nameRef as String
+}
+
+var bhUID = ""; var micUID = ""
+for id in deviceIDs {
+    let name = deviceName(id)
+    if name.contains("BlackHole 2ch") { bhUID = deviceUID(id) }
+    if name.contains("MacBook Pro Microphone") { micUID = deviceUID(id) }
+}
+// Check already exists
+for id in deviceIDs {
+    if deviceName(id) == "Meeting Capture" { print("ALREADY_EXISTS"); exit(0) }
+}
+guard !bhUID.isEmpty && !micUID.isEmpty else { print("MISSING_DEVICES"); exit(1) }
+
+let desc: NSDictionary = [
+    kAudioAggregateDeviceNameKey: "Meeting Capture",
+    kAudioAggregateDeviceUIDKey: "com.overheard.MeetingCapture",
+    kAudioAggregateDeviceSubDeviceListKey: [
+        [kAudioSubDeviceUIDKey: bhUID, kAudioSubDeviceDriftCompensationKey: 1],
+        [kAudioSubDeviceUIDKey: micUID, kAudioSubDeviceDriftCompensationKey: 1],
+    ],
+    kAudioAggregateDeviceMasterSubDeviceKey: micUID,
+    kAudioAggregateDeviceIsPrivateKey: 0
+]
+var newID: AudioDeviceID = 0
+let st = AudioHardwareCreateAggregateDevice(desc, &newID)
+print(st == noErr ? "CREATED" : "FAILED:\\(st)")
+exit(st == noErr ? 0 : 1)
+"""
+
+# Swift snippet that creates a Multi-Output Device named "Meeting Monitor"
+# combining MacBook Pro Speakers + BlackHole 2ch.
+_CREATE_MULTIOUT_SWIFT = """\
+import CoreAudio
+import Foundation
+
+var propSize: UInt32 = 0
+var prop = AudioObjectPropertyAddress(
+    mSelector: kAudioHardwarePropertyDevices,
+    mScope: kAudioObjectPropertyScopeGlobal,
+    mElement: kAudioObjectPropertyElementMain
+)
+AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &prop, 0, nil, &propSize)
+let deviceCount = Int(propSize) / MemoryLayout<AudioDeviceID>.size
+var deviceIDs = [AudioDeviceID](repeating: 0, count: deviceCount)
+AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &prop, 0, nil, &propSize, &deviceIDs)
+
+func deviceUID(_ id: AudioDeviceID) -> String {
+    var uidProp = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyDeviceUID,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var uidRef: CFString = "" as CFString
+    var sz = UInt32(MemoryLayout<CFString>.size)
+    AudioObjectGetPropertyData(id, &uidProp, 0, nil, &sz, &uidRef)
+    return uidRef as String
+}
+
+func deviceName(_ id: AudioDeviceID) -> String {
+    var nameProp = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyDeviceNameCFString,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var nameRef: CFString = "" as CFString
+    var sz = UInt32(MemoryLayout<CFString>.size)
+    AudioObjectGetPropertyData(id, &nameProp, 0, nil, &sz, &nameRef)
+    return nameRef as String
+}
+
+var bhUID = ""; var speakerUID = ""
+for id in deviceIDs {
+    let name = deviceName(id)
+    if name.contains("BlackHole 2ch") { bhUID = deviceUID(id) }
+    if name.contains("MacBook Pro Speakers") { speakerUID = deviceUID(id) }
+}
+for id in deviceIDs {
+    if deviceName(id) == "Meeting Monitor" { print("ALREADY_EXISTS"); exit(0) }
+}
+guard !bhUID.isEmpty && !speakerUID.isEmpty else { print("MISSING_DEVICES"); exit(1) }
+
+let desc: NSDictionary = [
+    kAudioAggregateDeviceNameKey: "Meeting Monitor",
+    kAudioAggregateDeviceUIDKey: "com.overheard.MeetingMonitor",
+    kAudioAggregateDeviceSubDeviceListKey: [
+        [kAudioSubDeviceUIDKey: speakerUID, kAudioSubDeviceDriftCompensationKey: 0],
+        [kAudioSubDeviceUIDKey: bhUID, kAudioSubDeviceDriftCompensationKey: 1],
+    ],
+    kAudioAggregateDeviceMasterSubDeviceKey: speakerUID,
+    kAudioAggregateDeviceIsPrivateKey: 0,
+    kAudioAggregateDeviceIsStackedKey: 0
+]
+var newID: AudioDeviceID = 0
+let st = AudioHardwareCreateAggregateDevice(desc, &newID)
+print(st == noErr ? "CREATED" : "FAILED:\\(st)")
+exit(st == noErr ? 0 : 1)
+"""
+
+
+def _run_swift_snippet(code: str) -> tuple[bool, str]:
+    """Write Swift code to a temp file, compile+run it, parse output."""
+    with tempfile.NamedTemporaryFile(suffix=".swift", mode="w", delete=False) as f:
+        f.write(code)
+        path = f.name
+    try:
+        result = subprocess.run(
+            ["swift", path],
+            capture_output=True, text=True, timeout=30
+        )
+        output = result.stdout.strip()
+        if output == "ALREADY_EXISTS":
+            return True, "Already exists"
+        if output == "CREATED":
+            return True, "Created successfully"
+        if output == "MISSING_DEVICES":
+            return False, "Required devices not found — is BlackHole 2ch installed?"
+        if result.returncode != 0:
+            err = (result.stderr or output)[:200]
+            return False, f"Error: {err}"
+        return True, output or "Done"
+    except subprocess.TimeoutExpired:
+        return False, "Timed out"
+    except FileNotFoundError:
+        return False, "swift not found — create device manually in Audio MIDI Setup"
+    finally:
+        os.unlink(path)
+
+
+def create_aggregate_device() -> tuple[bool, str]:
+    """Create 'Meeting Capture' aggregate device (BlackHole 2ch + MacBook Pro Microphone).
+
+    Returns (success, message).
+    """
+    return _run_swift_snippet(_CREATE_AGGREGATE_SWIFT)
+
+
+def create_multi_output_device() -> tuple[bool, str]:
+    """Create 'Meeting Monitor' multi-output device (MacBook Pro Speakers + BlackHole 2ch).
+
+    Returns (success, message).
+    """
+    return _run_swift_snippet(_CREATE_MULTIOUT_SWIFT)
