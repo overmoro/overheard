@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "overheard"
+version = "0.1.0"
+description = "Local macOS meeting transcription with speaker diarization"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "rumps>=0.4.0",
+    "sounddevice>=0.5.0",
+    "soundfile>=0.13.0",
+    "numpy>=1.24.0",
+    "whisperx>=3.1.0",
+]
+
+[project.scripts]
+overheard = "overheard.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
