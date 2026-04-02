@@ -5,7 +5,6 @@ from typing import Callable
 
 import objc
 from AppKit import (
-    NSApplication,
     NSBackingStoreBuffered,
     NSButton,
     NSColor,
@@ -17,11 +16,15 @@ from AppKit import (
 from Foundation import NSObject
 
 try:
-    from AppKit import NSWindowStyleMaskTitled, NSWindowStyleMaskClosable, NSWindowStyleMaskMiniaturizable
-    _STYLE = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
+    from AppKit import (
+        NSWindowStyleMaskTitled,
+        NSWindowStyleMaskClosable,
+        NSWindowStyleMaskNonactivatingPanel,
+    )
+    _STYLE = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskNonactivatingPanel
 except ImportError:
-    from AppKit import NSTitledWindowMask, NSClosableWindowMask, NSMiniaturizableWindowMask
-    _STYLE = NSTitledWindowMask | NSClosableWindowMask | NSMiniaturizableWindowMask
+    from AppKit import NSTitledWindowMask, NSClosableWindowMask
+    _STYLE = NSTitledWindowMask | NSClosableWindowMask | (1 << 7)  # NonactivatingPanel
 
 WIN_W = 260
 WIN_H = 110
@@ -101,8 +104,7 @@ class TransportWindow:
     def show(self) -> None:
         if self._window is None:
             self._build()
-        self._window.makeKeyAndOrderFront_(None)
-        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        self._window.orderFront_(None)
 
     def set_state(self, state: str, status: str = "") -> None:
         """Update button enabled states and status label for the given state."""
