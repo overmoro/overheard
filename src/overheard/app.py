@@ -112,10 +112,14 @@ class TranscriberApp(rumps.App):
 def main():
     _output_dir().mkdir(parents=True, exist_ok=True)
 
+    # Load HF_TOKEN from config if not already in environment
+    from overheard import config as cfg
     if not os.environ.get("HF_TOKEN"):
-        print("Warning: HF_TOKEN not set. Diarization will fail.", file=sys.stderr)
-        print("Set it with: export HF_TOKEN=your_token_here", file=sys.stderr)
-        print("Or open Preferences... from the menu bar icon.", file=sys.stderr)
+        stored = cfg.get("hf_token")
+        if stored:
+            os.environ["HF_TOKEN"] = stored
+        else:
+            print("Warning: HF_TOKEN not set. Open Preferences... to add it.", file=sys.stderr)
 
     app = TranscriberApp()
     app.run()

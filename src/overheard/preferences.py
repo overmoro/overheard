@@ -133,8 +133,9 @@ class _PreferencesDelegate(NSObject):
             self._token_status.setStringValue_("✗ Token is empty")
             return
         _write_hf_token_to_zshrc(token)
+        cfg.set_value("hf_token", token)
         os.environ["HF_TOKEN"] = token
-        self._token_status.setStringValue_("✓ Saved to ~/.zshrc and current environment")
+        self._token_status.setStringValue_("✓ Saved")
 
     # ---- Dependencies ------------------------------------------------------
 
