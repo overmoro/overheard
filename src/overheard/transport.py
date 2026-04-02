@@ -118,7 +118,7 @@ class TransportWindow:
         titles = {
             IDLE:         ("⏺", "⏸", "⏹"),
             RECORDING:    ("⏺", "⏸", "⏹"),
-            PAUSED:       ("▶", "⏸", "⏹"),
+            PAUSED:       ("⏺", "⏸", "⏹"),
             TRANSCRIBING: ("⏺", "⏸", "⏹"),
         }.get(state, ("⏺", "⏸", "⏹"))
 
