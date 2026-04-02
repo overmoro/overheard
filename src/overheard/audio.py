@@ -52,14 +52,23 @@ class Recorder:
         self.channels = channels
         self._chunks: list[np.ndarray] = []
         self._stream: sd.InputStream | None = None
+        self._paused: bool = False
+
+    def pause(self) -> None:
+        self._paused = True
+
+    def resume(self) -> None:
+        self._paused = False
 
     def start(self) -> None:
         self._chunks = []
+        self._paused = False
 
         def callback(indata, frames, time, status):
             if status:
                 print(f"Audio: {status}", file=sys.stderr)
-            self._chunks.append(indata.copy())
+            if not self._paused:
+                self._chunks.append(indata.copy())
 
         self._stream = sd.InputStream(
             device=self.device_id,
