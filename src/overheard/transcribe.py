@@ -37,10 +37,21 @@ def transcribe_audio(
     """
     import whisperx
     import torch
+    import numpy as np
 
     hf_token = os.environ.get("HF_TOKEN")
     if not hf_token:
         raise RuntimeError("HF_TOKEN environment variable not set")
+
+    # Pre-flight: check audio has meaningful signal before loading models
+    import soundfile as sf
+    audio_check, _ = sf.read(audio_path)
+    rms = float(np.sqrt(np.mean(audio_check ** 2)))
+    if rms < 0.001:
+        raise RuntimeError(
+            "Audio appears silent — check your recording device in Preferences. "
+            "The aggregate device (Meeting Capture) must be selected."
+        )
 
     # ctranslate2 (WhisperX backend) doesn't support MPS yet — use CPU
     # pyannote's speaker embedding model will use MPS if available
@@ -60,7 +71,11 @@ def transcribe_audio(
         language=language,
     )
     audio = whisperx.load_audio(audio_path)
-    result = model.transcribe(audio, batch_size=8)
+    result = model.transcribe(
+        audio,
+        batch_size=8,
+        vad_parameters={"threshold": 0.3, "min_speech_duration_ms": 200},
+    )
 
     if status_callback:
         status_callback("Aligning...")
