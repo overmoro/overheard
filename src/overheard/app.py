@@ -111,7 +111,8 @@ class TranscriberApp(rumps.App):
                 subprocess.Popen(["afplay", "/System/Library/Sounds/Glass.aiff"])
                 rumps.notification("Overheard", "Done", f"Saved: {filename}")
             except Exception as e:
-                self._set_state("idle", "Error")
+                msg = str(e)[:80]
+                self._set_state("idle", f"✗ {msg}")
                 rumps.notification("Overheard", "Error", str(e))
             finally:
                 os.unlink(tmp.name)
