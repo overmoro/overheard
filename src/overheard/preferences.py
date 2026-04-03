@@ -236,6 +236,31 @@ class _PreferencesDelegate(NSObject):
         val = self._local_speaker_field.stringValue().strip()
         cfg.set_value("local_speaker_name", val or "Don")
 
+    # ---- Integrations — Calendar -------------------------------------------
+
+    def connectCalendar_(self, sender):
+        """Trigger the macOS Calendar TCC permission prompt deliberately."""
+        self._calendar_status.setStringValue_("Requesting access…")
+        threading.Thread(target=self._do_connect_calendar, daemon=True).start()
+
+    def _do_connect_calendar(self):
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["osascript", "-e",
+                 'tell application "Calendar" to return name of first calendar'],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                self._calendar_status.setStringValue_("✓ Calendar access granted")
+            else:
+                err = (result.stderr or "Permission denied").strip()[:80]
+                self._calendar_status.setStringValue_(f"✗ {err}")
+        except subprocess.TimeoutExpired:
+            self._calendar_status.setStringValue_("✗ Timed out — check System Settings → Privacy → Calendars")
+        except Exception as e:
+            self._calendar_status.setStringValue_(f"✗ {e}")
+
 
 # ---------------------------------------------------------------------------
 # HF Token helpers
@@ -493,3 +518,15 @@ class PreferencesWindow:
         cv.addSubview_(local_speaker_field)
         self._delegate._local_speaker_field = local_speaker_field
         cv.addSubview_(_make_label("(used for mic channel attribution)", 320, y, 140, 20))
+        y -= 36
+
+        # Calendar access
+        cv.addSubview_(_make_button(
+            "Connect Calendar", 20, y, 160, 28,
+            "connectCalendar:", self._delegate,
+        ))
+        self._delegate._calendar_status = _make_status(190, y + 5)
+        self._delegate._calendar_status.setStringValue_(
+            "Autofills meeting name and attendees from your calendar"
+        )
+        cv.addSubview_(self._delegate._calendar_status)
