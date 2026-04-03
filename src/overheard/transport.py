@@ -28,7 +28,7 @@ except ImportError:
     from AppKit import NSTitledWindowMask, NSClosableWindowMask
     _STYLE = NSTitledWindowMask | NSClosableWindowMask | (1 << 7)  # NonactivatingPanel
 
-WIN_W = 260
+WIN_W = 400
 WIN_H = 150   # extra height for level meters
 
 # Transport states
@@ -262,11 +262,13 @@ class TransportWindow:
         self._delegate = _TransportDelegate.alloc().initWithCallbacks_(self._callbacks)
         cv = self._window.contentView()
 
-        # Buttons row
+        # Buttons row — centred in the window
         btn_y = 90
-        self._btn_record = _make_button("⏺", 18,  btn_y, "onRecord:", self._delegate)
-        self._btn_pause  = _make_button("⏸", 96,  btn_y, "onPause:",  self._delegate)
-        self._btn_stop   = _make_button("⏹", 174, btn_y, "onStop:",   self._delegate)
+        btn_total_w = 3 * 68 + 2 * 16  # three buttons + two gaps
+        btn_start_x = (WIN_W - btn_total_w) // 2
+        self._btn_record = _make_button("⏺", btn_start_x,        btn_y, "onRecord:", self._delegate)
+        self._btn_pause  = _make_button("⏸", btn_start_x + 84,   btn_y, "onPause:",  self._delegate)
+        self._btn_stop   = _make_button("⏹", btn_start_x + 168,  btn_y, "onStop:",   self._delegate)
         cv.addSubview_(self._btn_record)
         cv.addSubview_(self._btn_pause)
         cv.addSubview_(self._btn_stop)
