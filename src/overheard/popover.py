@@ -278,25 +278,44 @@ class TransportPopover:
         root.setBlendingMode_(0)   # NSVisualEffectBlendingModeBehindWindow
         root.setState_(1)          # NSVisualEffectStateActive
 
-        # ---- Header strip ------------------------------------------------
-        from AppKit import NSBox
+        # ---- Header strip (light grey, like WARP) -----------------------
+        from AppKit import NSBox, NSImage
         hdr = NSBox.alloc().initWithFrame_(NSMakeRect(0, POP_H - _HDR_H, POP_W, _HDR_H))
-        hdr.setBoxType_(0)          # NSBoxPrimary — filled box
-        hdr.setBorderType_(0)       # NSNoBorder
-        hdr.setFillColor_(NSColor.colorWithRed_green_blue_alpha_(0.11, 0.11, 0.18, 1.0))
-        hdr.setTitlePosition_(0)    # NSNoTitle
+        hdr.setBoxType_(0)
+        hdr.setBorderType_(0)
+        hdr.setFillColor_(NSColor.colorWithWhite_alpha_(0.94, 1.0))
+        hdr.setTitlePosition_(0)
 
         hdr_cv = hdr.contentView()
+
+        # App name + tagline
         hdr_cv.addSubview_(_lbl(
-            "Overheard", 16, 14, 160, 22,
-            size=15, bold=True,
-            color=NSColor.whiteColor(),
+            "Overheard", 16, 22, 200, 18,
+            size=13, bold=True,
+            color=NSColor.labelColor(),
+        ))
+        hdr_cv.addSubview_(_lbl(
+            "Meeting transcription", 16, 8, 200, 14,
+            size=10,
+            color=NSColor.secondaryLabelColor(),
         ))
 
-        gear = _footer_btn("⚙  Preferences", POP_W - 120, 12, 108,
-                            "openPreferences:", d)
-        gear.setContentTintColor_(NSColor.colorWithWhite_alpha_(0.75, 1.0))
+        # Gear icon button — top right, no bezel
+        gear = NSButton.alloc().initWithFrame_(NSMakeRect(POP_W - 44, 10, 28, 28))
+        gear.setTitle_("⚙")
+        gear.setFont_(NSFont.systemFontOfSize_(16))
+        gear.setBezelStyle_(14)     # NSBezelStyleInline — minimal
+        gear.setBordered_(False)
+        gear.setTarget_(d)
+        gear.setAction_("openPreferences:")
+        gear.setContentTintColor_(NSColor.secondaryLabelColor())
         hdr_cv.addSubview_(gear)
+
+        # Bottom border on header
+        from AppKit import NSBox as _NB
+        border = _NB.alloc().initWithFrame_(NSMakeRect(0, 0, POP_W, 1))
+        border.setBoxType_(2)   # NSSeparator
+        hdr_cv.addSubview_(border)
 
         root.addSubview_(hdr)
 
