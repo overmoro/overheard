@@ -181,6 +181,10 @@ class _PopoverDelegate(NSObject):
         cb = self._cbs.get("preferences")
         if cb: cb()
 
+    def quitApp_(self, sender):
+        import rumps
+        rumps.quit_application()
+
 
 # ---------------------------------------------------------------------------
 # TransportPopover
@@ -361,11 +365,14 @@ class TransportPopover:
 
         _sep(root, _SEP2_Y)
 
-        # ---- Footer link ------------------------------------------------
+        # ---- Footer links -----------------------------------------------
         root.addSubview_(_footer_btn(
             "Open Transcripts  ↗", 16, _FOOTER_Y, 180,
             "openTranscripts:", d,
         ))
+        quit_btn = _footer_btn("Quit", POP_W - 60, _FOOTER_Y, 44, "quitApp:", d)
+        quit_btn.setContentTintColor_(NSColor.secondaryLabelColor())
+        root.addSubview_(quit_btn)
 
         # ---- Popover -----------------------------------------------------
         vc = NSViewController.alloc().init()
