@@ -508,5 +508,9 @@ class TransportPopover:
         pop.setBehavior_(1)    # NSPopoverBehaviorTransient
         pop.setAnimates_(True)
 
+        # Force light appearance so the white body stays white in dark mode
+        from AppKit import NSAppearance
+        pop.setAppearance_(NSAppearance.appearanceNamed_("NSAppearanceNameAqua"))
+
         self._popover = pop
         self._delegate._popover_ref = pop
