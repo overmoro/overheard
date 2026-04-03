@@ -412,9 +412,9 @@ class TransportPopover:
         ))
 
         # Gear button
-        gear = NSButton.alloc().initWithFrame_(NSMakeRect(POP_W - 44, 10, 28, 28))
+        gear = NSButton.alloc().initWithFrame_(NSMakeRect(POP_W - 48, 8, 36, 36))
         gear.setTitle_("⚙")
-        gear.setFont_(NSFont.systemFontOfSize_(15))
+        gear.setFont_(NSFont.systemFontOfSize_(22))
         gear.setBordered_(False)
         gear.setBezelStyle_(14)
         gear.setTarget_(d)
@@ -507,10 +507,6 @@ class TransportPopover:
         pop.setContentSize_(root_box.frame().size)
         pop.setBehavior_(1)    # NSPopoverBehaviorTransient
         pop.setAnimates_(True)
-
-        # Force light appearance so the white body stays white in dark mode
-        from AppKit import NSAppearance
-        pop.setAppearance_(NSAppearance.appearanceNamed_("NSAppearanceNameAqua"))
 
         self._popover = pop
         self._delegate._popover_ref = pop
