@@ -279,13 +279,15 @@ class TransportPopover:
         root.setState_(1)          # NSVisualEffectStateActive
 
         # ---- Header strip ------------------------------------------------
-        hdr = NSView.alloc().initWithFrame_(NSMakeRect(0, POP_H - _HDR_H, POP_W, _HDR_H))
-        hdr.setWantsLayer_(True)
-        hdr.layer().setBackgroundColor_(
-            NSColor.colorWithRed_green_blue_alpha_(0.11, 0.11, 0.18, 1.0).CGColor()
-        )
+        from AppKit import NSBox
+        hdr = NSBox.alloc().initWithFrame_(NSMakeRect(0, POP_H - _HDR_H, POP_W, _HDR_H))
+        hdr.setBoxType_(0)          # NSBoxPrimary — filled box
+        hdr.setBorderType_(0)       # NSNoBorder
+        hdr.setFillColor_(NSColor.colorWithRed_green_blue_alpha_(0.11, 0.11, 0.18, 1.0))
+        hdr.setTitlePosition_(0)    # NSNoTitle
 
-        hdr.addSubview_(_lbl(
+        hdr_cv = hdr.contentView()
+        hdr_cv.addSubview_(_lbl(
             "Overheard", 16, 14, 160, 22,
             size=15, bold=True,
             color=NSColor.whiteColor(),
@@ -294,7 +296,7 @@ class TransportPopover:
         gear = _footer_btn("⚙  Preferences", POP_W - 120, 12, 108,
                             "openPreferences:", d)
         gear.setContentTintColor_(NSColor.colorWithWhite_alpha_(0.75, 1.0))
-        hdr.addSubview_(gear)
+        hdr_cv.addSubview_(gear)
 
         root.addSubview_(hdr)
 
