@@ -135,45 +135,51 @@ class TranscriberApp(rumps.App):
         # Steps 3-5: do slow work (AppleScript, pgrep) in background,
         # then schedule the panel show on the main thread via a timer.
         def _gather_and_show():
+            print("DEBUG: _gather_and_show started", flush=True)
+
             # Calendar query runs in a daemon thread with a hard join timeout.
-            # Using a plain thread (not ThreadPoolExecutor) ensures we never
-            # wait for the underlying osascript process — the thread is
-            # abandoned after 3 seconds and the details panel appears anyway.
             meeting_info = [None]
             def _cal_query():
+                print("DEBUG: calendar query starting", flush=True)
                 try:
                     from overheard.calendar import get_current_meeting
                     meeting_info[0] = get_current_meeting()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"DEBUG: calendar exception: {e}", flush=True)
+                print("DEBUG: calendar query done", flush=True)
             cal_thread = threading.Thread(target=_cal_query, daemon=True)
             cal_thread.start()
             cal_thread.join(timeout=3)
+            print(f"DEBUG: calendar join complete, result={meeting_info[0]}", flush=True)
             meeting_info = meeting_info[0]
 
+            print("DEBUG: running detect_source", flush=True)
             try:
                 from overheard.meeting import detect_source, infer_location
                 source = detect_source()
                 location = infer_location(source)
-            except Exception:
+            except Exception as e:
+                print(f"DEBUG: detect_source exception: {e}", flush=True)
                 source = "in-person"
                 location = ""
 
+            print(f"DEBUG: source={source}, scheduling panel", flush=True)
             cal_name = meeting_info.title if meeting_info else ""
             cal_attendees = meeting_info.attendees if meeting_info else []
             cal_location = (meeting_info.location
                             if (meeting_info and meeting_info.location) else location)
 
-            # Store results for the main-thread callback to use
             self._pending_meeting_meta = (cal_name, source, cal_location, cal_attendees)
 
-            # Schedule UI on main thread
+            print("DEBUG: starting rumps.Timer", flush=True)
             t = rumps.Timer(self._show_details_on_main, 0.05)
             t.start()
+            print("DEBUG: rumps.Timer started", flush=True)
 
         threading.Thread(target=_gather_and_show, daemon=True).start()
 
     def _show_details_on_main(self, timer):
+        print("DEBUG: _show_details_on_main fired", flush=True)
         timer.stop()
         meta = getattr(self, "_pending_meeting_meta", ("", "in-person", "", []))
         cal_name, source, cal_location, cal_attendees = meta
