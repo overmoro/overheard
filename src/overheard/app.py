@@ -230,6 +230,8 @@ class TranscriberApp(rumps.App):
                 subprocess.Popen(["afplay", "/System/Library/Sounds/Glass.aiff"])
                 rumps.notification("Overheard", "Done", f"Saved: {filename}")
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 msg = str(e)[:80]
                 self._set_state("idle", f"\u2717 {msg}")
                 rumps.notification("Overheard", "Error", str(e))
