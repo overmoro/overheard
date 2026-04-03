@@ -133,7 +133,7 @@ class _AttendeeDataSource(NSObject):
 
 class _DetailsDelegate(NSObject):
 
-    def initWithCallbacks_(self, callback, discard_callback):
+    def initWithCallback_discardCallback_(self, callback, discard_callback):
         self = objc.super(_DetailsDelegate, self).init()
         if self is None:
             return None
@@ -258,7 +258,7 @@ class DetailsPanel:
         self._window.center()
         self._window.setFloatingPanel_(True)
 
-        self._delegate = _DetailsDelegate.alloc().initWithCallbacks_(self._callback, self._discard_callback)
+        self._delegate = _DetailsDelegate.alloc().initWithCallback_discardCallback_(self._callback, self._discard_callback)
         self._delegate._window = self._window
         self._data_source = _AttendeeDataSource.alloc().init()
         self._delegate._data_source = self._data_source
