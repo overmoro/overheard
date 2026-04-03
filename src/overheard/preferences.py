@@ -29,7 +29,7 @@ from overheard.audio import create_aggregate_device, create_multi_output_device
 
 # Window dimensions
 WIN_W = 480
-WIN_H = 560
+WIN_H = 720   # taller to accommodate Integrations section
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +201,40 @@ class _PreferencesDelegate(NSObject):
             self._output_field.setStringValue_(path)
             cfg.set_value("output_dir", path)
             self._output_status.setStringValue_("✓ Saved")
+
+    # ---- Integrations — Obsidian -------------------------------------------
+
+    def toggleObsidian_(self, sender):
+        enabled = bool(sender.state())
+        cfg.set_value("obsidian_enabled", enabled)
+        self._obsidian_vault_field.setEnabled_(enabled)
+        self._obsidian_inbox_field.setEnabled_(enabled)
+        self._obsidian_browse_btn.setEnabled_(enabled)
+
+    def browseObsidianVault_(self, sender):
+        panel = NSOpenPanel.openPanel()
+        panel.setCanChooseFiles_(False)
+        panel.setCanChooseDirectories_(True)
+        panel.setAllowsMultipleSelection_(False)
+        panel.setTitle_("Select Obsidian Vault Folder")
+
+        current = self._obsidian_vault_field.stringValue()
+        if current:
+            from Foundation import NSURL
+            panel.setDirectoryURL_(NSURL.fileURLWithPath_(current))
+
+        if panel.runModal() == 1:
+            path = panel.URL().path()
+            self._obsidian_vault_field.setStringValue_(path)
+            cfg.set_value("obsidian_vault", path)
+
+    def saveObsidianInbox_(self, sender):
+        val = self._obsidian_inbox_field.stringValue().strip()
+        cfg.set_value("obsidian_inbox", val or "01_Inbox")
+
+    def saveLocalSpeakerName_(self, sender):
+        val = self._local_speaker_field.stringValue().strip()
+        cfg.set_value("local_speaker_name", val or "Don")
 
 
 # ---------------------------------------------------------------------------
@@ -390,3 +424,72 @@ class PreferencesWindow:
         keep_btn.setAction_("toggleKeepRecordings:")
         cv.addSubview_(keep_btn)
         self._delegate._keep_recordings_btn = keep_btn
+        y -= 40
+
+        cv.addSubview_(_make_label("─" * 62, 20, y, WIN_W - 40, 16))
+        y -= 22
+
+        # ------------------------------------------------------------------ #
+        # Section 5: Integrations
+        # ------------------------------------------------------------------ #
+        cv.addSubview_(_make_label("Integrations", 20, y, 300, 22, bold=True))
+        y -= 30
+
+        # Obsidian enable checkbox
+        obsidian_enabled = bool(cfg.get("obsidian_enabled", False))
+        obs_check = _NSButton.alloc().initWithFrame_(NSMakeRect(20, y, 300, 20))
+        obs_check.setButtonType_(3)
+        obs_check.setTitle_("Save transcripts to Obsidian vault")
+        obs_check.setState_(1 if obsidian_enabled else 0)
+        obs_check.setTarget_(self._delegate)
+        obs_check.setAction_("toggleObsidian:")
+        cv.addSubview_(obs_check)
+        self._delegate._obsidian_check = obs_check
+        y -= 30
+
+        # Vault path
+        cv.addSubview_(_make_label("Vault path:", 20, y, 90, 20))
+        obs_vault_field = _make_text_field(
+            115, y, WIN_W - 215, 24,
+            placeholder="/Users/you/Documents/MyVault",
+        )
+        obs_vault_field.setStringValue_(cfg.get("obsidian_vault", ""))
+        obs_vault_field.setEnabled_(obsidian_enabled)
+        cv.addSubview_(obs_vault_field)
+        self._delegate._obsidian_vault_field = obs_vault_field
+
+        obs_browse_btn = _make_button(
+            "Browse...", WIN_W - 94, y, 74, 24,
+            "browseObsidianVault:", self._delegate,
+        )
+        obs_browse_btn.setEnabled_(obsidian_enabled)
+        cv.addSubview_(obs_browse_btn)
+        self._delegate._obsidian_browse_btn = obs_browse_btn
+        y -= 32
+
+        # Inbox folder
+        cv.addSubview_(_make_label("Inbox folder:", 20, y, 90, 20))
+        obs_inbox_field = _make_text_field(
+            115, y, 200, 24,
+            placeholder="01_Inbox",
+        )
+        obs_inbox_field.setStringValue_(cfg.get("obsidian_inbox", "01_Inbox"))
+        obs_inbox_field.setEnabled_(obsidian_enabled)
+        obs_inbox_field.setTarget_(self._delegate)
+        obs_inbox_field.setAction_("saveObsidianInbox:")
+        cv.addSubview_(obs_inbox_field)
+        self._delegate._obsidian_inbox_field = obs_inbox_field
+        y -= 32
+
+        # Local speaker name (mic attribution)
+        cv.addSubview_(_make_label("Your name:", 20, y, 90, 20))
+        local_speaker_field = _make_text_field(
+            115, y, 200, 24,
+            placeholder="Don",
+        )
+        local_speaker_field.setStringValue_(cfg.get("local_speaker_name", "Don"))
+        local_speaker_field.setTarget_(self._delegate)
+        local_speaker_field.setAction_("saveLocalSpeakerName:")
+        cv.addSubview_(local_speaker_field)
+        self._delegate._local_speaker_field = local_speaker_field
+        cv.addSubview_(_make_label("(used for mic channel attribution)", 320, y, 140, 20))

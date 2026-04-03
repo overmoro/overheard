@@ -13,6 +13,9 @@ FALLBACK_DEVICES = ["BlackHole", "MacBook Pro Microphone"]
 SAMPLE_RATE = 16000
 CHANNELS = 1
 
+# Number of audio frames used for live level metering (~100ms at 16 kHz)
+_LEVEL_WINDOW_FRAMES = 1600
+
 
 def find_device(name: str) -> int | None:
     """Find an audio input device by name (case-insensitive partial match)."""
@@ -62,15 +65,47 @@ def list_input_devices() -> list[dict]:
 
 
 class Recorder:
-    """Simple audio recorder using sounddevice."""
+    """Audio recorder using sounddevice.
+
+    Attempts multi-channel recording when the device has >=3 channels
+    (e.g. Meeting Capture aggregate: BlackHole 2ch + mic). Falls back to
+    mono if the device reports fewer channels.
+
+    Channel layout convention for 3-channel aggregate:
+        ch 0, 1 — system audio (BlackHole)
+        ch 2    — microphone
+    """
+
+    # Minimum channel count to attempt multi-channel recording
+    _MIN_MULTICHANNEL = 3
 
     def __init__(self, device_id: int, sample_rate: int = SAMPLE_RATE, channels: int = CHANNELS):
         self.device_id = device_id
         self.sample_rate = sample_rate
-        self.channels = channels
+
+        # Detect actual channel count from device
+        try:
+            info = sd.query_devices(device_id)
+            avail = info["max_input_channels"]
+        except Exception:
+            avail = 1
+
+        if avail >= self._MIN_MULTICHANNEL:
+            self.channels = avail
+            self._is_multichannel = True
+            self._channels_info: dict | None = {
+                "mic_channel": avail - 1,
+                "system_channels": list(range(avail - 1)),
+            }
+        else:
+            self.channels = channels
+            self._is_multichannel = False
+            self._channels_info = None
+
         self._chunks: list[np.ndarray] = []
         self._stream: sd.InputStream | None = None
         self._paused: bool = False
+        self._level_buf: np.ndarray | None = None  # last N frames for metering
 
     def pause(self) -> None:
         self._paused = True
@@ -81,12 +116,16 @@ class Recorder:
     def start(self) -> None:
         self._chunks = []
         self._paused = False
+        self._level_buf = None
 
         def callback(indata, frames, time, status):
             if status:
                 print(f"Audio: {status}", file=sys.stderr)
             if not self._paused:
-                self._chunks.append(indata.copy())
+                data = indata.copy()
+                self._chunks.append(data)
+                # Keep a rolling window for level metering
+                self._level_buf = data
 
         self._stream = sd.InputStream(
             device=self.device_id,
@@ -96,18 +135,54 @@ class Recorder:
         )
         self._stream.start()
 
-    def stop(self) -> np.ndarray | None:
+    def stop(self) -> tuple[np.ndarray | None, dict | None]:
+        """Stop recording.
+
+        Returns:
+            (audio_array, channels_info) where channels_info is either
+            {"mic_channel": int, "system_channels": [int, ...]} for multichannel,
+            or None for mono.
+        """
         if self._stream:
             self._stream.stop()
             self._stream.close()
             self._stream = None
         if not self._chunks:
-            return None
+            return None, None
         audio = np.concatenate(self._chunks, axis=0)
         self._chunks = []
-        return audio
+        self._level_buf = None
+        return audio, self._channels_info
+
+    def get_levels(self) -> tuple[float, float]:
+        """Return (mic_rms, system_rms) from the last captured audio buffer.
+
+        For mono recordings, both values are the same.
+        Returns (0.0, 0.0) when not recording.
+        """
+        buf = self._level_buf
+        if buf is None or len(buf) == 0:
+            return 0.0, 0.0
+
+        if self._is_multichannel and self._channels_info is not None:
+            mic_ch = self._channels_info["mic_channel"]
+            sys_chs = self._channels_info["system_channels"]
+            mic_rms = float(np.sqrt(np.mean(buf[:, mic_ch] ** 2)))
+            if sys_chs:
+                sys_data = buf[:, sys_chs]
+                sys_rms = float(np.sqrt(np.mean(sys_data ** 2)))
+            else:
+                sys_rms = mic_rms
+        else:
+            # Mono — collapse to single channel
+            mono = buf[:, 0] if buf.ndim > 1 else buf
+            rms = float(np.sqrt(np.mean(mono ** 2)))
+            mic_rms = sys_rms = rms
+
+        return mic_rms, sys_rms
 
     def save(self, audio: np.ndarray, path: str) -> str:
+        """Write audio array to WAV. Handles both mono and multi-channel."""
         sf.write(path, audio, self.sample_rate)
         return path
 

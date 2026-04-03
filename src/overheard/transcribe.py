@@ -16,12 +16,19 @@ WHISPER_MODEL = "large-v3"
 OUTPUT_DIR = Path(cfg.get("output_dir", str(Path.home() / "meeting-transcripts")))
 
 
+def _build_speaker_map(attendees: list[str]) -> dict[str, str]:
+    """Build {SPEAKER_00: "Name", SPEAKER_01: "Name"} from an ordered attendee list."""
+    return {f"SPEAKER_{i:02d}": name for i, name in enumerate(attendees) if name}
+
+
 def transcribe_audio(
     audio_path: str,
     output_path: str,
     model_size: str = WHISPER_MODEL,
     language: str = "en",
     status_callback=None,
+    meeting_details=None,   # MeetingDetails | None
+    mic_speaker: str | None = None,
 ) -> str:
     """Transcribe audio with WhisperX and write a diarized markdown file.
 
@@ -31,6 +38,9 @@ def transcribe_audio(
         model_size: Whisper model size (default: large-v3).
         language: Language code for transcription.
         status_callback: Optional callable for progress updates.
+        meeting_details: Optional MeetingDetails for frontmatter and speaker labels.
+        mic_speaker: Optional name for the mic channel speaker (plumbed through;
+            channel-separation logic applied in audio pipeline).
 
     Returns:
         The output_path on success.
@@ -107,19 +117,68 @@ def transcribe_audio(
     if status_callback:
         status_callback("Writing transcript...")
 
-    _write_markdown(result, output_path)
+    # Build speaker map from meeting details
+    speaker_map: dict[str, str] = {}
+    if meeting_details is not None and meeting_details.attendees:
+        speaker_map = _build_speaker_map(meeting_details.attendees)
+
+    _write_markdown(result, output_path, meeting_details=meeting_details, speaker_map=speaker_map)
     return output_path
 
 
-def _write_markdown(result: dict, output_path: str) -> None:
+def _write_markdown(
+    result: dict,
+    output_path: str,
+    meeting_details=None,   # MeetingDetails | None
+    speaker_map: dict[str, str] | None = None,
+) -> None:
     """Format WhisperX result as a diarized markdown transcript."""
     now = datetime.now()
     title = now.strftime("%-d %B %Y, %-I:%M%p").replace("AM", "am").replace("PM", "pm")
-    lines = [f"# Meeting \u2014 {title}\n"]
 
+    lines = []
+
+    # ---- YAML frontmatter --------------------------------------------------
+    if meeting_details is not None:
+        created = now.strftime("%Y-%m-%d")
+        meeting_title = f"[[{meeting_details.name}]]" if meeting_details.name else "[[Meeting]]"
+        attendee_lines = ""
+        if meeting_details.attendees:
+            formatted = [f'  - "[[{name}]]"' for name in meeting_details.attendees if name]
+            if formatted:
+                attendee_lines = "\n" + "\n".join(formatted)
+        else:
+            attendee_lines = ""
+
+        location_val = meeting_details.location or ""
+        source_val = meeting_details.source or "in-person"
+
+        lines.append("---")
+        lines.append("type: transcript")
+        lines.append(f"created: {created}")
+        lines.append(f"source: {source_val}")
+        lines.append(f"location: {location_val}")
+        lines.append(f'meeting: "{meeting_title}"')
+        lines.append(f"attendees:{attendee_lines if attendee_lines else ' []'}")
+        lines.append("status: inbox")
+        lines.append("topics: []")
+        lines.append("---")
+        lines.append("")
+
+    # ---- Heading -----------------------------------------------------------
+    lines.append(f"# Meeting \u2014 {title}\n")
+
+    # ---- Transcript body ---------------------------------------------------
+    speaker_map = speaker_map or {}
     current_speaker = None
+
     for seg in result.get("segments", []):
-        speaker = seg.get("speaker", "Unknown")
+        raw_speaker = seg.get("speaker", "Unknown")
+        # Resolve speaker label to name if mapping exists
+        display_speaker = speaker_map.get(raw_speaker, raw_speaker)
+        if display_speaker and display_speaker != raw_speaker:
+            display_speaker = f"[[{display_speaker}]]"
+
         start = seg.get("start", 0)
         text = seg.get("text", "").strip()
         if not text:
@@ -127,9 +186,9 @@ def _write_markdown(result: dict, output_path: str) -> None:
 
         ts = f"[{int(start)//3600:02d}:{(int(start)%3600)//60:02d}:{int(start)%60:02d}]"
 
-        if speaker != current_speaker:
-            current_speaker = speaker
-            lines.append(f"\n**{speaker}:** {ts} {text}")
+        if display_speaker != current_speaker:
+            current_speaker = display_speaker
+            lines.append(f"\n**{display_speaker}:** {ts} {text}")
         else:
             lines.append(f"{ts} {text}")
 

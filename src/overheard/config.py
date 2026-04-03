@@ -12,6 +12,10 @@ CONFIG_PATH = CONFIG_DIR / "config.json"
 
 DEFAULTS = {
     "output_dir": str(Path.home() / "overheard" / "transcripts"),
+    "obsidian_enabled": False,
+    "obsidian_vault": "",
+    "obsidian_inbox": "01_Inbox",
+    "local_speaker_name": "Don",
 }
 
 

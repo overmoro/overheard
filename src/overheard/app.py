@@ -11,7 +11,7 @@ from pathlib import Path
 import rumps
 
 from overheard import config as cfg
-from overheard.audio import Recorder, find_recording_device, DEFAULT_DEVICE_NAME
+from overheard.audio import Recorder, find_recording_device, DEFAULT_DEVICE_NAME, SAMPLE_RATE
 from overheard.transcribe import transcribe_audio
 
 
@@ -57,6 +57,25 @@ def _output_dir() -> Path:
     return Path(cfg.get("output_dir", str(Path.home() / "overheard" / "transcripts")))
 
 
+def _resolve_output_path(filename: str) -> Path:
+    """Determine where to write the transcript.
+
+    If Obsidian integration is enabled and configured, write to vault/inbox/.
+    Otherwise fall back to the configured output directory.
+    """
+    if cfg.get("obsidian_enabled", False):
+        vault = cfg.get("obsidian_vault", "")
+        inbox = cfg.get("obsidian_inbox", "01_Inbox")
+        if vault:
+            dest = Path(vault) / inbox
+            dest.mkdir(parents=True, exist_ok=True)
+            return dest / filename
+
+    out = _output_dir()
+    out.mkdir(parents=True, exist_ok=True)
+    return out / filename
+
+
 class TranscriberApp(rumps.App):
     def __init__(self):
         super().__init__("Overheard", icon=None, title="\U0001f3a4")
@@ -64,6 +83,8 @@ class TranscriberApp(rumps.App):
         self._recorder: Recorder | None = None
         self._transport = None   # lazy-init inside rumps run loop
         self._prefs_window = None
+        self._details_panel = None
+        self._level_timer: rumps.Timer | None = None
 
     # ------------------------------------------------------------------
     # Menu items
@@ -95,6 +116,7 @@ class TranscriberApp(rumps.App):
         if self._state == "paused" and self._recorder:
             self._recorder.resume()
             self._set_state("recording", "Recording...")
+            self._start_level_timer()
             return
 
         device_id = find_recording_device()
@@ -107,18 +129,28 @@ class TranscriberApp(rumps.App):
 
         self._recorder = Recorder(device_id)
         self._recorder.start()
+
+        # Inform transport panel whether we're multichannel
+        if self._transport:
+            self._transport.configure_channels(self._recorder._is_multichannel)
+
         self._set_state("recording", "Recording...")
+        self._start_level_timer()
 
     def _on_pause(self):
         if self._state == "recording" and self._recorder:
             self._recorder.pause()
+            self._stop_level_timer()
             self._set_state("paused", "Paused")
 
     def _on_stop(self):
         if self._state not in ("recording", "paused") or not self._recorder:
             return
 
-        audio = self._recorder.stop()
+        self._stop_level_timer()
+
+        # Step 1: stop recorder, get audio + channel info
+        audio, channels_info = self._recorder.stop()
         self._recorder = None
 
         if audio is None or len(audio) == 0:
@@ -126,17 +158,69 @@ class TranscriberApp(rumps.App):
             rumps.notification("Overheard", "", "No audio captured.")
             return
 
-        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        from overheard.audio import SAMPLE_RATE
+        # Step 2: save temp WAV
         import soundfile as sf
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         sf.write(tmp.name, audio, SAMPLE_RATE)
         tmp.close()
+        tmp_path = tmp.name
 
-        output_dir = _output_dir()
-        output_dir.mkdir(parents=True, exist_ok=True)
-        now = datetime.now()
-        filename = now.strftime("%Y-%m-%d_%H%M") + "_meeting.md"
-        output_path = str(output_dir / filename)
+        # Step 3: query calendar for meeting info
+        try:
+            from overheard.calendar import get_current_meeting
+            meeting_info = get_current_meeting()
+        except Exception:
+            meeting_info = None
+
+        # Step 4: detect meeting source
+        try:
+            from overheard.meeting import detect_source, infer_location
+            source = detect_source()
+            location = infer_location(source)
+        except Exception:
+            source = "in-person"
+            location = ""
+
+        # Step 5: show Details panel
+        self._ensure_details_panel()
+
+        cal_name = meeting_info.title if meeting_info else ""
+        cal_attendees = meeting_info.attendees if meeting_info else []
+        cal_location = meeting_info.location if (meeting_info and meeting_info.location) else location
+
+        self._set_state("idle", "Fill in details...")
+
+        self._details_panel.show(
+            name=cal_name,
+            source=source,
+            location=cal_location,
+            attendees=cal_attendees,
+            speaker_count=2,
+        )
+
+        # Callback will fire when user clicks "Start Transcription"
+        # We store the tmp path for use in the callback
+        self._pending_wav = tmp_path
+        self._pending_channels_info = channels_info
+
+    # ------------------------------------------------------------------
+    # Details panel callback
+    # ------------------------------------------------------------------
+
+    def _on_details_confirmed(self, details):
+        """Called from DetailsPanel after user fills in meeting metadata."""
+        from overheard.details_panel import make_filename
+        from overheard import config as cfg
+
+        tmp_path = getattr(self, "_pending_wav", None)
+        if not tmp_path:
+            return
+
+        filename = make_filename(details)
+        output_path = str(_resolve_output_path(filename))
+
+        # Mic speaker name for attribution (plumbed through, not yet active)
+        mic_speaker = cfg.get("local_speaker_name") or None
 
         self._set_state("transcribing", "Transcribing...")
 
@@ -144,22 +228,62 @@ class TranscriberApp(rumps.App):
             try:
                 def on_status(msg):
                     self._set_state("transcribing", msg)
-                transcribe_audio(tmp.name, output_path, status_callback=on_status)
-                self._set_state("idle", "Done ✓")
+
+                transcribe_audio(
+                    tmp_path,
+                    output_path,
+                    status_callback=on_status,
+                    meeting_details=details,
+                    mic_speaker=mic_speaker,
+                )
+                self._set_state("idle", "Done \u2713")
                 subprocess.Popen(["afplay", "/System/Library/Sounds/Glass.aiff"])
                 rumps.notification("Overheard", "Done", f"Saved: {filename}")
             except Exception as e:
                 msg = str(e)[:80]
-                self._set_state("idle", f"✗ {msg}")
+                self._set_state("idle", f"\u2717 {msg}")
                 rumps.notification("Overheard", "Error", str(e))
             finally:
                 if cfg.get("keep_recordings", False):
                     audio_path = output_path.replace(".md", ".wav")
-                    os.rename(tmp.name, audio_path)
+                    os.rename(tmp_path, audio_path)
                 else:
-                    os.unlink(tmp.name)
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+                self._pending_wav = None
+                self._pending_channels_info = None
 
         threading.Thread(target=run, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Level meter timer
+    # ------------------------------------------------------------------
+
+    def _start_level_timer(self):
+        if self._level_timer is not None:
+            return
+        self._level_timer = rumps.Timer(self._update_levels, 0.1)
+        self._level_timer.start()
+
+    def _stop_level_timer(self):
+        if self._level_timer is not None:
+            self._level_timer.stop()
+            self._level_timer = None
+        if self._transport:
+            self._transport.set_levels(0.0, 0.0)
+
+    def _update_levels(self, timer):
+        if self._recorder is None:
+            self._stop_level_timer()
+            return
+        try:
+            mic, sys_lvl = self._recorder.get_levels()
+            if self._transport:
+                self._transport.set_levels(mic, sys_lvl)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Helpers
@@ -190,6 +314,11 @@ class TranscriberApp(rumps.App):
                 "pause":  self._on_pause,
                 "stop":   self._on_stop,
             })
+
+    def _ensure_details_panel(self):
+        if self._details_panel is None:
+            from overheard.details_panel import DetailsPanel
+            self._details_panel = DetailsPanel(callback=self._on_details_confirmed)
 
 
 def main():
