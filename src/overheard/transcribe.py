@@ -94,12 +94,13 @@ def transcribe_audio(
     diarize_pipeline.to(torch.device(diarize_device))
     # Pre-load audio as tensor to bypass torchcodec (broken on PyTorch 2.8+)
     waveform, sample_rate = torchaudio.load(audio_path)
-    diarize_annotation = diarize_pipeline({"waveform": waveform, "sample_rate": sample_rate})
-    # Convert pyannote Annotation to DataFrame expected by whisperx.assign_word_speakers
+    diarize_output = diarize_pipeline({"waveform": waveform, "sample_rate": sample_rate})
+    # DiarizeOutput is a named tuple — extract the Annotation, then convert to DataFrame
+    annotation = getattr(diarize_output, "speaker_diarization", diarize_output)
     import pandas as pd
     diarize_df = pd.DataFrame([
         {"start": turn.start, "end": turn.end, "speaker": speaker}
-        for turn, _, speaker in diarize_annotation.itertracks(yield_label=True)
+        for turn, _, speaker in annotation.itertracks(yield_label=True)
     ])
     result = whisperx.assign_word_speakers(diarize_df, result)
 
