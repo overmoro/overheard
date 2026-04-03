@@ -188,27 +188,35 @@ def _write_markdown(
     # ---- Transcript body ---------------------------------------------------
     speaker_map = speaker_map or {}
     current_speaker = None
+    current_ts = ""
+    current_texts: list[str] = []
+
+    def _flush_speaker():
+        if current_speaker and current_texts:
+            paragraph = " ".join(current_texts)
+            lines.append(f"\n**{current_speaker}** {current_ts}\n{paragraph}")
 
     for seg in result.get("segments", []):
         raw_speaker = seg.get("speaker", "SPEAKER_00")
-        # Resolve to attendee name, or fall back to "Speaker 1", "Speaker 2" etc.
         if raw_speaker in speaker_map:
             display_speaker = f"[[{speaker_map[raw_speaker]}]]"
         else:
             display_speaker = _format_speaker(raw_speaker)
 
-        start = seg.get("start", 0)
         text = seg.get("text", "").strip()
         if not text:
             continue
 
-        ts = f"[{int(start)//3600:02d}:{(int(start)%3600)//60:02d}:{int(start)%60:02d}]"
-
         if display_speaker != current_speaker:
+            _flush_speaker()
+            start = seg.get("start", 0)
+            current_ts = f"[{int(start)//3600:02d}:{(int(start)%3600)//60:02d}:{int(start)%60:02d}]"
             current_speaker = display_speaker
-            lines.append(f"\n**{display_speaker}:** {ts} {text}")
+            current_texts = [text]
         else:
-            lines.append(f"{ts} {text}")
+            current_texts.append(text)
+
+    _flush_speaker()
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
