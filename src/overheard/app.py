@@ -135,19 +135,21 @@ class TranscriberApp(rumps.App):
         # Steps 3-5: do slow work (AppleScript, pgrep) in background,
         # then schedule the panel show on the main thread via a timer.
         def _gather_and_show():
-            import concurrent.futures
-
-            # Calendar query runs in its own thread with a hard wall-clock
-            # timeout so that a TCC permission dialog or slow iCloud sync
-            # can never block the details panel from appearing.
-            meeting_info = None
-            try:
-                from overheard.calendar import get_current_meeting
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                    future = ex.submit(get_current_meeting)
-                    meeting_info = future.result(timeout=3)
-            except Exception:
-                meeting_info = None
+            # Calendar query runs in a daemon thread with a hard join timeout.
+            # Using a plain thread (not ThreadPoolExecutor) ensures we never
+            # wait for the underlying osascript process — the thread is
+            # abandoned after 3 seconds and the details panel appears anyway.
+            meeting_info = [None]
+            def _cal_query():
+                try:
+                    from overheard.calendar import get_current_meeting
+                    meeting_info[0] = get_current_meeting()
+                except Exception:
+                    pass
+            cal_thread = threading.Thread(target=_cal_query, daemon=True)
+            cal_thread.start()
+            cal_thread.join(timeout=3)
+            meeting_info = meeting_info[0]
 
             try:
                 from overheard.meeting import detect_source, infer_location
