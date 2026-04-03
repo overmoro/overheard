@@ -39,22 +39,21 @@ def _resolve_output_path(filename: str) -> Path:
     return out / filename
 
 
-def _icon_path() -> str | None:
-    """Resolve path to the app icon, works both from repo and inside .app bundle."""
-    # Inside .app bundle: Resources/overheard.icns
-    bundle_icon = Path(__file__).parent.parent.parent / "Resources" / "overheard.icns"
-    if bundle_icon.exists():
-        return str(bundle_icon)
-    # Running from repo directly
-    repo_icon = Path(__file__).parent.parent.parent / "icon" / "overheard.icns"
-    if repo_icon.exists():
-        return str(repo_icon)
+def _resolve_icon(name: str) -> str | None:
+    """Resolve an icon file from bundle Resources or repo icon/ directory."""
+    for candidate in [
+        Path(__file__).parent.parent.parent / "Resources" / name,
+        Path(__file__).parent.parent.parent / "icon" / name,
+    ]:
+        if candidate.exists():
+            return str(candidate)
     return None
 
 
 class TranscriberApp(rumps.App):
     def __init__(self):
-        super().__init__("Overheard", icon=_icon_path(), title="\U0001f3a4")
+        icon = _resolve_icon("menubar.png")
+        super().__init__("Overheard", icon=icon, template=True, title="")
         self._state = "idle"
         self._recorder: Recorder | None = None
         self._transport = None   # lazy-init inside rumps run loop
@@ -296,13 +295,15 @@ class TranscriberApp(rumps.App):
 
     def _set_state(self, state: str, status: str = "") -> None:
         self._state = state
-        icons = {
-            "idle":         "\U0001f3a4",
-            "recording":    "\U0001f534",
-            "paused":       "\u23f8",
-            "transcribing": "\u23f3",
+        # Idle: just the icon, no title clutter.
+        # Active states: short emoji badge next to the icon.
+        titles = {
+            "idle":         "",
+            "recording":    " \U0001f534",
+            "paused":       " \u23f8",
+            "transcribing": " \u23f3",
         }
-        self.title = icons.get(state, "\U0001f3a4")
+        self.title = titles.get(state, "")
         if self._transport:
             from overheard.transport import IDLE, RECORDING, PAUSED, TRANSCRIBING
             state_map = {
