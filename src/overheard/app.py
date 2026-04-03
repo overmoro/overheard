@@ -205,8 +205,9 @@ def main():
 
     app = TranscriberApp()
 
-    # Auto-open controls on first launch
-    def _open_on_start(_):
+    # Auto-open controls once at startup
+    def _open_on_start(timer):
+        timer.stop()
         app._ensure_transport()
         app._transport.show()
 
