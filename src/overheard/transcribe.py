@@ -71,11 +71,7 @@ def transcribe_audio(
         language=language,
     )
     audio = whisperx.load_audio(audio_path)
-    result = model.transcribe(
-        audio,
-        batch_size=8,
-        vad_parameters={"threshold": 0.3, "min_speech_duration_ms": 200},
-    )
+    result = model.transcribe(audio, batch_size=8)
 
     if status_callback:
         status_callback("Aligning...")
