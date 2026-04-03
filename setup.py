@@ -14,6 +14,7 @@ DATA_FILES = []
 OPTIONS = {
     "semi_standalone": True,
     "argv_emulation": False,
+    "iconfile": "icon/overheard.icns",
     "plist": {
         "CFBundleName": "Overheard",
         "CFBundleDisplayName": "Overheard",

@@ -39,9 +39,22 @@ def _resolve_output_path(filename: str) -> Path:
     return out / filename
 
 
+def _icon_path() -> str | None:
+    """Resolve path to the app icon, works both from repo and inside .app bundle."""
+    # Inside .app bundle: Resources/overheard.icns
+    bundle_icon = Path(__file__).parent.parent.parent / "Resources" / "overheard.icns"
+    if bundle_icon.exists():
+        return str(bundle_icon)
+    # Running from repo directly
+    repo_icon = Path(__file__).parent.parent.parent / "icon" / "overheard.icns"
+    if repo_icon.exists():
+        return str(repo_icon)
+    return None
+
+
 class TranscriberApp(rumps.App):
     def __init__(self):
-        super().__init__("Overheard", icon=None, title="\U0001f3a4")
+        super().__init__("Overheard", icon=_icon_path(), title="\U0001f3a4")
         self._state = "idle"
         self._recorder: Recorder | None = None
         self._transport = None   # lazy-init inside rumps run loop
