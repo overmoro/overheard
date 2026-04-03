@@ -1,7 +1,7 @@
 """macOS Calendar integration — find the current meeting via AppleScript."""
 
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 
 
@@ -14,33 +14,35 @@ class MeetingInfo:
 
 
 _APPLESCRIPT = """
-tell application "Calendar"
-    set now to current date
-    set windowStart to now - (30 * minutes)
-    set windowEnd to now + (90 * minutes)
-    set found to {}
-    repeat with c in calendars
-        set evts to (every event of c whose start date >= windowStart and start date <= windowEnd)
-        repeat with e in evts
-            set eTitle to summary of e
-            set eLoc to ""
-            try
-                set eLoc to location of e
-                if eLoc is missing value then set eLoc to ""
-            end try
-            set eStart to start date of e
-            set eAtts to {}
-            try
-                set atts to attendees of e
-                repeat with a in atts
-                    set end of eAtts to display name of a
-                end repeat
-            end try
-            set end of found to {eTitle, eLoc, eStart, eAtts}
+with timeout of 4 seconds
+    tell application "Calendar"
+        set now to current date
+        set windowStart to now - (30 * minutes)
+        set windowEnd to now + (90 * minutes)
+        set found to {}
+        repeat with c in calendars
+            set evts to (every event of c whose start date >= windowStart and start date <= windowEnd)
+            repeat with e in evts
+                set eTitle to summary of e
+                set eLoc to ""
+                try
+                    set eLoc to location of e
+                    if eLoc is missing value then set eLoc to ""
+                end try
+                set eStart to start date of e
+                set eAtts to {}
+                try
+                    set atts to attendees of e
+                    repeat with a in atts
+                        set end of eAtts to display name of a
+                    end repeat
+                end try
+                set end of found to {eTitle, eLoc, eStart, eAtts}
+            end repeat
         end repeat
-    end repeat
-    return found
-end tell
+        return found
+    end tell
+end timeout
 """
 
 
@@ -63,6 +65,19 @@ def _parse_applescript_date(date_str: str) -> datetime | None:
     return None
 
 
+def _calendar_is_running() -> bool:
+    """Return True only if Calendar.app is already running (do not launch it)."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-x", "Calendar"],
+            capture_output=True,
+            timeout=2,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 def get_current_meeting() -> MeetingInfo | None:
     """Query macOS Calendar for an event within ±30 minutes of now.
 
@@ -70,12 +85,17 @@ def get_current_meeting() -> MeetingInfo | None:
     Calendar is not running, or AppleScript access is denied.
     Never raises.
     """
+    # Skip if Calendar isn't running — launching it via AppleScript can block
+    # on a TCC permission dialog and hang the background thread.
+    if not _calendar_is_running():
+        return None
+
     try:
         result = subprocess.run(
             ["osascript", "-e", _APPLESCRIPT],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=5,
         )
         if result.returncode != 0 or not result.stdout.strip():
             return None
