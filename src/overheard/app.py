@@ -141,7 +141,7 @@ class TranscriberApp(rumps.App):
             _mi = [None]
             def _cal():
                 try:
-                    from overheard.calendar import get_current_meeting
+                    from overheard.cal import get_current_meeting
                     _mi[0] = get_current_meeting()
                 except Exception:
                     pass
