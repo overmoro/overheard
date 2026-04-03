@@ -313,7 +313,21 @@ class TranscriberApp(rumps.App):
             self._details_panel = DetailsPanel(callback=self._on_details_confirmed)
 
 
+def _ensure_homebrew_path() -> None:
+    """Add Homebrew bin to PATH if not already present.
+
+    Subprocesses (ffmpeg, swift, osascript wrappers) need /opt/homebrew/bin
+    which may not be inherited when launching from a menu bar agent or
+    outside a login shell.
+    """
+    homebrew_bin = "/opt/homebrew/bin"
+    current = os.environ.get("PATH", "")
+    if homebrew_bin not in current.split(":"):
+        os.environ["PATH"] = homebrew_bin + ":" + current
+
+
 def main():
+    _ensure_homebrew_path()
     _output_dir().mkdir(parents=True, exist_ok=True)
 
     if not os.environ.get("HF_TOKEN"):
