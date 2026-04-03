@@ -1,11 +1,10 @@
-"""Overheard — menu bar popover transport UI."""
+"""Overheard — menu bar popover transport UI (styled)."""
 
 import math
 import threading
 
 import objc
 from AppKit import (
-    NSApplication,
     NSButton,
     NSColor,
     NSFont,
@@ -14,34 +13,44 @@ from AppKit import (
     NSPopover,
     NSTextField,
     NSTextAlignmentCenter,
+    NSTextAlignmentLeft,
     NSView,
     NSViewController,
+    NSVisualEffectView,
 )
 from Foundation import NSObject
 
-# Popover dimensions
-POP_W = 280
-POP_H = 256
+# ---------------------------------------------------------------------------
+# Geometry
+# ---------------------------------------------------------------------------
+POP_W  = 300
+POP_H  = 280
 
-# Edge: NSMaxYEdge = 1 (popover appears below status bar item)
+_HDR_H  = 52          # coloured header height
+_BTN_Y  = POP_H - _HDR_H - 80   # transport button row y
+_BTN_D  = 56          # button diameter
+_STATUS_Y = _BTN_Y - 28
+_SEP1_Y   = _STATUS_Y - 10
+_M_Y      = _SEP1_Y - 26   # meter row y
+_SEP2_Y   = _M_Y - 14
+_FOOTER_Y = _SEP2_Y - 32
+
+# NSPopoverBehaviorTransient = 1, edge: NSMinYEdge = 3 (below status bar)
 _NSMinYEdge = 3
 
-# Level meter geometry
-_M_SEGS = 18
-_M_H    = 7
-_M_LABEL_W = 18
-_M_X    = 22
-_M_BAR_X = _M_X + _M_LABEL_W + 4
-_M_BAR_W = POP_W - _M_BAR_X - 16
+# Meter geometry
+_M_SEGS  = 20
+_M_H     = 8
+_M_LBL_W = 22
+_M_BAR_X = 20 + _M_LBL_W + 6
+_M_BAR_W = POP_W - _M_BAR_X - 20
 
 
 # ---------------------------------------------------------------------------
-# Level bar view
+# Segmented level bar
 # ---------------------------------------------------------------------------
 
 class _LevelBar(NSView):
-    """Segmented horizontal level meter."""
-
     def init(self):
         self = objc.super(_LevelBar, self).init()
         if self is None:
@@ -50,109 +59,39 @@ class _LevelBar(NSView):
         self._active: bool = False
         return self
 
-    def setLevel_(self, level: float) -> None:
-        self._level = max(0.0, min(1.0, level))
+    def setLevel_(self, v: float) -> None:
+        self._level = max(0.0, min(1.0, v))
         self.setNeedsDisplay_(True)
 
-    def setActive_(self, active: bool) -> None:
-        self._active = active
+    def setActive_(self, v: bool) -> None:
+        self._active = v
         self.setNeedsDisplay_(True)
 
     def drawRect_(self, rect) -> None:
         from AppKit import NSBezierPath
-        b = self.bounds()
-        w = b.size.width
-        h = b.size.height
-        seg_w = (w - (_M_SEGS - 1)) / _M_SEGS
-        active_n = int(self._level * _M_SEGS) if self._active else 0
-
+        b    = self.bounds()
+        sw   = (b.size.width - (_M_SEGS - 1)) / _M_SEGS
+        n    = int(self._level * _M_SEGS) if self._active else 0
         for i in range(_M_SEGS):
-            x = i * (seg_w + 1)
-            if i < active_n:
+            x = i * (sw + 1)
+            if i < n:
                 frac = i / _M_SEGS
-                if frac < 0.6:
-                    NSColor.systemGreenColor().colorWithAlphaComponent_(0.85).setFill()
-                elif frac < 0.85:
-                    NSColor.systemYellowColor().colorWithAlphaComponent_(0.85).setFill()
-                else:
-                    NSColor.systemRedColor().colorWithAlphaComponent_(0.85).setFill()
+                if   frac < 0.60: NSColor.systemGreenColor().colorWithAlphaComponent_(0.9).setFill()
+                elif frac < 0.85: NSColor.systemYellowColor().colorWithAlphaComponent_(0.9).setFill()
+                else:              NSColor.systemRedColor().colorWithAlphaComponent_(0.9).setFill()
             else:
-                NSColor.separatorColor().setFill()
-            bar_rect = NSMakeRect(x, 0, seg_w, h)
+                NSColor.tertiaryLabelColor().setFill()
             NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                bar_rect, 2.0, 2.0
+                NSMakeRect(x, 0, sw, b.size.height), 2, 2
             ).fill()
 
 
 # ---------------------------------------------------------------------------
-# Popover action delegate
+# Helpers
 # ---------------------------------------------------------------------------
 
-class _PopoverDelegate(NSObject):
-
-    def initWithCallbacks_(self, callbacks: dict):
-        self = objc.super(_PopoverDelegate, self).init()
-        if self is None:
-            return None
-        self._callbacks = callbacks
-        self._popover_ref = None   # set after popover is built
-        return self
-
-    # ------------------------------------------------------------------
-    # Popover toggle (called by status bar button)
-    # ------------------------------------------------------------------
-
-    def togglePopover_(self, sender):
-        pop = self._popover_ref
-        if pop is None:
-            return
-        if pop.isShown():
-            pop.performClose_(sender)
-        else:
-            pop.showRelativeToRect_ofView_preferredEdge_(
-                sender.bounds(), sender, _NSMinYEdge
-            )
-
-    # ------------------------------------------------------------------
-    # Transport
-    # ------------------------------------------------------------------
-
-    def onRecord_(self, sender):
-        cb = self._callbacks.get("record")
-        if cb:
-            threading.Thread(target=cb, daemon=True).start()
-
-    def onPause_(self, sender):
-        cb = self._callbacks.get("pause")
-        if cb:
-            cb()
-
-    def onStop_(self, sender):
-        cb = self._callbacks.get("stop")
-        if cb:
-            cb()
-
-    # ------------------------------------------------------------------
-    # Footer
-    # ------------------------------------------------------------------
-
-    def openTranscripts_(self, sender):
-        cb = self._callbacks.get("open_transcripts")
-        if cb:
-            cb()
-
-    def openPreferences_(self, sender):
-        cb = self._callbacks.get("preferences")
-        if cb:
-            cb()
-
-
-# ---------------------------------------------------------------------------
-# UI helpers
-# ---------------------------------------------------------------------------
-
-def _label(text: str, x, y, w, h, size=12, bold=False, color=None,
-           align=None) -> NSTextField:
+def _lbl(text, x, y, w, h, size=12, bold=False, color=None,
+         align=NSTextAlignmentLeft) -> NSTextField:
     f = NSTextField.alloc().initWithFrame_(NSMakeRect(x, y, w, h))
     f.setStringValue_(text)
     f.setBezeled_(False)
@@ -160,41 +99,37 @@ def _label(text: str, x, y, w, h, size=12, bold=False, color=None,
     f.setEditable_(False)
     f.setSelectable_(False)
     f.setLineBreakMode_(NSLineBreakByTruncatingTail)
-    if bold:
-        f.setFont_(NSFont.boldSystemFontOfSize_(size))
-    else:
-        f.setFont_(NSFont.systemFontOfSize_(size))
-    if color:
-        f.setTextColor_(color)
-    if align is not None:
-        f.setAlignment_(align)
+    f.setFont_(NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size))
+    if color: f.setTextColor_(color)
+    f.setAlignment_(align)
     return f
 
 
-def _sep(y: float) -> NSView:
-    """Horizontal 1px separator."""
+def _sep(parent, y):
     from AppKit import NSBox
-    box = NSBox.alloc().initWithFrame_(NSMakeRect(0, y, POP_W, 1))
-    box.setBoxType_(2)        # NSSeparator
-    return box
+    box = NSBox.alloc().initWithFrame_(NSMakeRect(16, y, POP_W - 32, 1))
+    box.setBoxType_(2)   # NSSeparator
+    parent.addSubview_(box)
 
 
-def _transport_btn(title: str, x: float, y: float, action: str,
-                   target) -> NSButton:
-    btn = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, 72, 44))
-    btn.setTitle_(title)
-    btn.setBezelStyle_(1)   # NSBezelStyleRounded
+def _circle_btn(symbol, x, y, d, action, target,
+                tint=None, bg=None) -> NSButton:
+    """Circular button with large symbol glyph."""
+    btn = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, d, d))
+    btn.setTitle_(symbol)
+    btn.setBezelStyle_(7)            # NSBezelStyleCircular
     btn.setFont_(NSFont.systemFontOfSize_(22))
     btn.setTarget_(target)
     btn.setAction_(action)
+    if tint:
+        btn.setContentTintColor_(tint)
     return btn
 
 
-def _link_btn(title: str, x: float, y: float, w: float, action: str,
-              target) -> NSButton:
+def _footer_btn(title, x, y, w, action, target) -> NSButton:
     btn = NSButton.alloc().initWithFrame_(NSMakeRect(x, y, w, 22))
     btn.setTitle_(title)
-    btn.setBezelStyle_(14)   # NSBezelStyleInline
+    btn.setBezelStyle_(14)           # NSBezelStyleInline
     btn.setFont_(NSFont.systemFontOfSize_(12))
     btn.setTarget_(target)
     btn.setAction_(action)
@@ -203,15 +138,56 @@ def _link_btn(title: str, x: float, y: float, w: float, action: str,
 
 
 # ---------------------------------------------------------------------------
+# Popover delegate
+# ---------------------------------------------------------------------------
+
+class _PopoverDelegate(NSObject):
+
+    def initWithCallbacks_(self, cbs: dict):
+        self = objc.super(_PopoverDelegate, self).init()
+        if self is None:
+            return None
+        self._cbs = cbs
+        self._popover_ref = None
+        return self
+
+    def togglePopover_(self, sender):
+        pop = self._popover_ref
+        if pop is None: return
+        if pop.isShown():
+            pop.performClose_(sender)
+        else:
+            pop.showRelativeToRect_ofView_preferredEdge_(
+                sender.bounds(), sender, _NSMinYEdge
+            )
+
+    def onRecord_(self, sender):
+        cb = self._cbs.get("record")
+        if cb: threading.Thread(target=cb, daemon=True).start()
+
+    def onPause_(self, sender):
+        cb = self._cbs.get("pause")
+        if cb: cb()
+
+    def onStop_(self, sender):
+        cb = self._cbs.get("stop")
+        if cb: cb()
+
+    def openTranscripts_(self, sender):
+        cb = self._cbs.get("open_transcripts")
+        if cb: cb()
+
+    def openPreferences_(self, sender):
+        cb = self._cbs.get("preferences")
+        if cb: cb()
+
+
+# ---------------------------------------------------------------------------
 # TransportPopover
 # ---------------------------------------------------------------------------
 
 class TransportPopover:
-    """Menu bar popover with transport controls and level meters.
-
-    Call hook_status_item(btn) once after the rumps run loop starts to
-    attach toggle behaviour to the status bar button.
-    """
+    """Styled popover attached to the menu bar status item button."""
 
     def __init__(self, callbacks: dict):
         self._delegate = _PopoverDelegate.alloc().initWithCallbacks_(callbacks)
@@ -228,11 +204,10 @@ class TransportPopover:
         self._build()
 
     # ------------------------------------------------------------------
-    # Public API (mirrors TransportWindow)
+    # Public API
     # ------------------------------------------------------------------
 
     def hook_status_item(self, status_btn) -> None:
-        """Attach the popover toggle to the status bar button."""
         status_btn.setTarget_(self._delegate)
         status_btn.setAction_("togglePopover:")
 
@@ -248,26 +223,31 @@ class TransportPopover:
         self._btn_record.setEnabled_(enabled[0])
         self._btn_pause.setEnabled_(enabled[1])
         self._btn_stop.setEnabled_(enabled[2])
+
+        # Colour the record button red while recording
+        if state == RECORDING:
+            self._btn_record.setContentTintColor_(NSColor.systemRedColor())
+        else:
+            self._btn_record.setContentTintColor_(NSColor.labelColor())
+
         self._status_lbl.setStringValue_(status)
 
-        show_meters = state in (RECORDING, PAUSED)
-        self._set_meters_visible(show_meters)
-        if not show_meters:
+        show = state in (RECORDING, PAUSED)
+        self._set_meters_visible(show)
+        if not show:
             self.set_levels(0.0, 0.0)
 
-    def set_levels(self, mic_rms: float, system_rms: float) -> None:
-        if self._mic_bar is None:
-            return
+    def set_levels(self, mic_rms: float, sys_rms: float) -> None:
+        if not self._mic_bar: return
 
-        def _to_level(rms: float) -> float:
-            if rms <= 0:
-                return 0.0
+        def _to_level(rms):
+            if rms <= 0: return 0.0
             db = 20 * math.log10(max(rms, 1e-9))
             return max(0.0, min(1.0, (db + 60) / 60))
 
         self._mic_bar.setLevel_(_to_level(mic_rms))
         if self._is_multichannel and self._sys_bar:
-            self._sys_bar.setLevel_(_to_level(system_rms))
+            self._sys_bar.setLevel_(_to_level(sys_rms))
 
     def configure_channels(self, is_multichannel: bool) -> None:
         self._is_multichannel = is_multichannel
@@ -278,107 +258,124 @@ class TransportPopover:
     # Internal
     # ------------------------------------------------------------------
 
-    def _set_meters_visible(self, visible: bool) -> None:
-        if self._mic_row:
-            self._mic_row.setHidden_(not visible)
-        if self._sys_row:
-            self._sys_row.setHidden_(not (visible and self._is_multichannel))
-        if self._mic_bar:
-            self._mic_bar.setActive_(visible)
-        if self._sys_bar:
-            self._sys_bar.setActive_(visible and self._is_multichannel)
+    def _set_meters_visible(self, v: bool) -> None:
+        if self._mic_row: self._mic_row.setHidden_(not v)
+        if self._sys_row: self._sys_row.setHidden_(not (v and self._is_multichannel))
+        if self._mic_bar: self._mic_bar.setActive_(v)
+        if self._sys_bar: self._sys_bar.setActive_(v and self._is_multichannel)
 
     def _build(self) -> None:
-        # ---- Content view -----------------------------------------------
-        content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, POP_W, POP_H))
-
         d = self._delegate
 
-        # ---- Title row --------------------------------------------------
-        content.addSubview_(_label(
-            "Overheard", 16, POP_H - 36, 160, 22,
-            size=14, bold=True,
+        # ---- Root view (vibrancy) ----------------------------------------
+        root = NSVisualEffectView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, POP_W, POP_H)
+        )
+        root.setBlendingMode_(0)   # NSVisualEffectBlendingModeBehindWindow
+        root.setState_(1)          # NSVisualEffectStateActive
+
+        # ---- Header strip ------------------------------------------------
+        hdr = NSView.alloc().initWithFrame_(NSMakeRect(0, POP_H - _HDR_H, POP_W, _HDR_H))
+        hdr.setWantsLayer_(True)
+        hdr.layer().setBackgroundColor_(
+            NSColor.colorWithRed_green_blue_alpha_(0.11, 0.11, 0.18, 1.0).CGColor()
+        )
+
+        hdr.addSubview_(_lbl(
+            "Overheard", 16, 14, 160, 22,
+            size=15, bold=True,
+            color=NSColor.whiteColor(),
         ))
-        content.addSubview_(_link_btn(
-            "⚙  Preferences", POP_W - 116, POP_H - 34, 104,
-            "openPreferences:", d,
-        ))
 
-        content.addSubview_(_sep(POP_H - 44))
+        gear = _footer_btn("⚙  Preferences", POP_W - 120, 12, 108,
+                            "openPreferences:", d)
+        gear.setContentTintColor_(NSColor.colorWithWhite_alpha_(0.75, 1.0))
+        hdr.addSubview_(gear)
 
-        # ---- Transport buttons ------------------------------------------
-        # Three 72×44 buttons, centred
-        total_btn_w = 3 * 72 + 2 * 10
-        btn_start = (POP_W - total_btn_w) // 2
+        root.addSubview_(hdr)
 
-        self._btn_record = _transport_btn("⏺", btn_start,        POP_H - 100, "onRecord:", d)
-        self._btn_pause  = _transport_btn("⏸", btn_start + 82,   POP_H - 100, "onPause:",  d)
-        self._btn_stop   = _transport_btn("⏹", btn_start + 164,  POP_H - 100, "onStop:",   d)
-        content.addSubview_(self._btn_record)
-        content.addSubview_(self._btn_pause)
-        content.addSubview_(self._btn_stop)
+        # ---- Transport buttons -------------------------------------------
+        total = 3 * _BTN_D + 2 * 16
+        bx    = (POP_W - total) // 2
 
-        # ---- Status label -----------------------------------------------
-        self._status_lbl = _label(
-            "Ready", 16, POP_H - 118, POP_W - 32, 16,
-            size=11, color=NSColor.secondaryLabelColor(),
+        self._btn_record = _circle_btn(
+            "⏺", bx,           _BTN_Y, _BTN_D, "onRecord:", d,
+            tint=NSColor.labelColor(),
+        )
+        self._btn_pause = _circle_btn(
+            "⏸", bx + _BTN_D + 16, _BTN_Y, _BTN_D, "onPause:", d,
+            tint=NSColor.secondaryLabelColor(),
+        )
+        self._btn_stop = _circle_btn(
+            "⏹", bx + (_BTN_D + 16) * 2, _BTN_Y, _BTN_D, "onStop:", d,
+            tint=NSColor.secondaryLabelColor(),
+        )
+        root.addSubview_(self._btn_record)
+        root.addSubview_(self._btn_pause)
+        root.addSubview_(self._btn_stop)
+
+        # ---- Status label ------------------------------------------------
+        self._status_lbl = _lbl(
+            "Ready", 0, _STATUS_Y, POP_W, 18,
+            size=12,
+            color=NSColor.secondaryLabelColor(),
             align=NSTextAlignmentCenter,
         )
-        content.addSubview_(self._status_lbl)
+        root.addSubview_(self._status_lbl)
 
-        content.addSubview_(_sep(POP_H - 126))
+        _sep(root, _SEP1_Y)
 
-        # ---- Mic meter row ----------------------------------------------
+        # ---- Mic meter row -----------------------------------------------
         mic_row = NSView.alloc().initWithFrame_(
-            NSMakeRect(0, POP_H - 148, POP_W, 16)
+            NSMakeRect(0, _M_Y, POP_W, 14)
         )
-        mic_row.addSubview_(_label(
-            "\U0001f3a4", _M_X, 2, _M_LABEL_W, 12, size=10,
+        mic_row.addSubview_(_lbl(
+            "🎤", 20, 1, _M_LBL_W, 12, size=10,
         ))
         mic_bar = _LevelBar.alloc().initWithFrame_(
-            NSMakeRect(_M_BAR_X, 4, _M_BAR_W, _M_H)
+            NSMakeRect(_M_BAR_X, 3, _M_BAR_W, _M_H)
         )
         mic_bar.setWantsLayer_(True)
         mic_row.addSubview_(mic_bar)
         mic_row.setHidden_(True)
-        content.addSubview_(mic_row)
+        root.addSubview_(mic_row)
         self._mic_bar = mic_bar
         self._mic_row = mic_row
 
-        # ---- Sys meter row ----------------------------------------------
+        # ---- Sys meter row -----------------------------------------------
         sys_row = NSView.alloc().initWithFrame_(
-            NSMakeRect(0, POP_H - 168, POP_W, 16)
+            NSMakeRect(0, _M_Y - 18, POP_W, 14)
         )
-        sys_row.addSubview_(_label(
-            "\U0001f50a", _M_X, 2, _M_LABEL_W, 12, size=10,
+        sys_row.addSubview_(_lbl(
+            "🔊", 20, 1, _M_LBL_W, 12, size=10,
         ))
         sys_bar = _LevelBar.alloc().initWithFrame_(
-            NSMakeRect(_M_BAR_X, 4, _M_BAR_W, _M_H)
+            NSMakeRect(_M_BAR_X, 3, _M_BAR_W, _M_H)
         )
         sys_bar.setWantsLayer_(True)
         sys_row.addSubview_(sys_bar)
         sys_row.setHidden_(True)
-        content.addSubview_(sys_row)
+        root.addSubview_(sys_row)
         self._sys_bar = sys_bar
         self._sys_row = sys_row
 
-        content.addSubview_(_sep(POP_H - 176))
+        _sep(root, _SEP2_Y)
 
-        # ---- Footer links -----------------------------------------------
-        content.addSubview_(_link_btn(
-            "Open Transcripts  ↗", 16, POP_H - 200, 160,
+        # ---- Footer link ------------------------------------------------
+        root.addSubview_(_footer_btn(
+            "Open Transcripts  ↗", 16, _FOOTER_Y, 180,
             "openTranscripts:", d,
         ))
 
-        # ---- Wire popover -----------------------------------------------
+        # ---- Popover -----------------------------------------------------
         vc = NSViewController.alloc().init()
-        vc.setView_(content)
+        vc.setView_(root)
 
-        popover = NSPopover.alloc().init()
-        popover.setContentViewController_(vc)
-        popover.setContentSize_(content.frame().size)
-        popover.setBehavior_(1)   # NSPopoverBehaviorTransient
-        popover.setAnimates_(True)
+        pop = NSPopover.alloc().init()
+        pop.setContentViewController_(vc)
+        pop.setContentSize_(root.frame().size)
+        pop.setBehavior_(1)    # NSPopoverBehaviorTransient
+        pop.setAnimates_(True)
 
-        self._popover = popover
-        self._delegate._popover_ref = popover
+        self._popover = pop
+        self._delegate._popover_ref = pop
