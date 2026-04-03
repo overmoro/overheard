@@ -19,17 +19,20 @@ from AppKit import (
     NSMakeRect,
     NSPanel,
     NSSecureTextField,
+    NSTabView,
+    NSTabViewItem,
     NSTextField,
     NSOpenPanel,
+    NSView,
 )
-from Foundation import NSObject
+from Foundation import NSObject, NSString
 
 from overheard import config as cfg
 from overheard.audio import create_aggregate_device, create_multi_output_device
 
 # Window dimensions
-WIN_W = 480
-WIN_H = 720   # taller to accommodate Integrations section
+WIN_W = 500
+WIN_H = 360   # tabs keep each pane compact
 
 
 # ---------------------------------------------------------------------------
@@ -335,198 +338,187 @@ class PreferencesWindow:
         self._delegate = _PreferencesDelegate.alloc().initWithWindow_(self._window)
         cv = self._window.contentView()
 
-        y = WIN_H - 40
+        # ---- Tab view fills the window ------------------------------------
+        tab_view = NSTabView.alloc().initWithFrame_(NSMakeRect(0, 0, WIN_W, WIN_H))
+        cv.addSubview_(tab_view)
 
-        # ------------------------------------------------------------------ #
-        # Section 1: Audio Setup
-        # ------------------------------------------------------------------ #
-        y -= 10
-        cv.addSubview_(_make_label("Audio Setup", 20, y, 220, 22, bold=True))
-        y -= 30
+        def _make_tab(label: str) -> NSView:
+            item = NSTabViewItem.alloc().initWithIdentifier_(label)
+            item.setLabel_(label)
+            tab_view.addTabViewItem_(item)
+            return item.view()
 
-        btn_agg = _make_button(
-            "Create Recording Device", 20, y, 200, 28,
-            "createRecordingDevice:", self._delegate,
-        )
-        cv.addSubview_(btn_agg)
-        self._delegate._aggregate_status = _make_status(228, y + 5)
-        self._delegate._aggregate_status.setStringValue_(_device_exists("Meeting Capture"))
-        cv.addSubview_(self._delegate._aggregate_status)
+        # Inner pane dimensions (inside the tab chrome)
+        PW = WIN_W - 40   # pane width available for content
+        BOTTOM = 20       # y baseline inside each pane
+
+        # ================================================================== #
+        # Tab 1 — Audio
+        # ================================================================== #
+        pane = _make_tab("Audio")
+        y = 240
+
+        pane.addSubview_(_make_label("Recording Devices", 20, y, 300, 22, bold=True))
         y -= 36
 
-        btn_mo = _make_button(
-            "Create Monitoring Device", 20, y, 200, 28,
-            "createMonitoringDevice:", self._delegate,
-        )
-        cv.addSubview_(btn_mo)
-        self._delegate._multiout_status = _make_status(228, y + 5)
+        btn_agg = _make_button("Create Recording Device", 20, y, 210, 28,
+                               "createRecordingDevice:", self._delegate)
+        pane.addSubview_(btn_agg)
+        self._delegate._aggregate_status = _make_status(238, y + 5, PW - 220)
+        self._delegate._aggregate_status.setStringValue_(_device_exists("Meeting Capture"))
+        pane.addSubview_(self._delegate._aggregate_status)
+        y -= 36
+
+        btn_mo = _make_button("Create Monitoring Device", 20, y, 210, 28,
+                              "createMonitoringDevice:", self._delegate)
+        pane.addSubview_(btn_mo)
+        self._delegate._multiout_status = _make_status(238, y + 5, PW - 220)
         self._delegate._multiout_status.setStringValue_(_device_exists("Meeting Monitor"))
-        cv.addSubview_(self._delegate._multiout_status)
-        y -= 44
+        pane.addSubview_(self._delegate._multiout_status)
+        y -= 50
 
-        cv.addSubview_(_make_label("─" * 62, 20, y, WIN_W - 40, 16))
-        y -= 22
+        pane.addSubview_(_make_label(
+            "Creates CoreAudio aggregate devices combining BlackHole 2ch\n"
+            "and your MacBook microphone/speakers for meeting capture.",
+            20, y, PW, 32,
+        ))
 
-        # ------------------------------------------------------------------ #
-        # Section 2: Hugging Face Token
-        # ------------------------------------------------------------------ #
-        cv.addSubview_(_make_label("Hugging Face Token", 20, y, 300, 22, bold=True))
-        y -= 30
+        # ================================================================== #
+        # Tab 2 — Transcription
+        # ================================================================== #
+        pane = _make_tab("Transcription")
+        y = 240
+
+        pane.addSubview_(_make_label("Hugging Face Token", 20, y, 300, 22, bold=True))
+        y -= 10
+        pane.addSubview_(_make_label(
+            "Required for speaker diarization (pyannote). Get one at huggingface.co.",
+            20, y, PW, 18,
+        ))
+        y -= 34
 
         self._delegate._token_field = _make_text_field(
-            20, y, 300, 24,
+            20, y, PW - 90, 24,
             placeholder="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
             secure=True,
         )
         if os.environ.get("HF_TOKEN"):
             self._delegate._token_field.setStringValue_(os.environ["HF_TOKEN"])
-        cv.addSubview_(self._delegate._token_field)
+        pane.addSubview_(self._delegate._token_field)
+        pane.addSubview_(_make_button("Save", PW - 64, y, 80, 24,
+                                     "saveToken:", self._delegate))
+        y -= 28
 
-        cv.addSubview_(_make_button(
-            "Save", 330, y, 80, 24,
-            "saveToken:", self._delegate,
-        ))
-        y -= 26
-
-        self._delegate._token_status = _make_status(20, y)
+        self._delegate._token_status = _make_status(20, y, PW)
         self._delegate._token_status.setStringValue_(
             "✓ Token is currently set" if os.environ.get("HF_TOKEN") else "No token set"
         )
-        cv.addSubview_(self._delegate._token_status)
-        y -= 40
+        pane.addSubview_(self._delegate._token_status)
+        y -= 50
 
-        cv.addSubview_(_make_label("─" * 62, 20, y, WIN_W - 40, 16))
-        y -= 22
+        pane.addSubview_(_make_label("AI Models", 20, y, 300, 22, bold=True))
+        y -= 36
 
-        # ------------------------------------------------------------------ #
-        # Section 3: Dependencies
-        # ------------------------------------------------------------------ #
-        cv.addSubview_(_make_label("Dependencies", 20, y, 300, 22, bold=True))
-        y -= 30
+        pane.addSubview_(_make_button("Download Models", 20, y, 160, 28,
+                                     "downloadModels:", self._delegate))
+        self._delegate._deps_status = _make_status(190, y + 5, PW - 170)
+        self._delegate._deps_status.setStringValue_("Whisper large-v3 + pyannote")
+        pane.addSubview_(self._delegate._deps_status)
 
-        cv.addSubview_(_make_button(
-            "Download Models", 20, y, 160, 28,
-            "downloadModels:", self._delegate,
-        ))
-        self._delegate._deps_status = _make_status(190, y + 5)
-        self._delegate._deps_status.setStringValue_("large-v3 + pyannote")
-        cv.addSubview_(self._delegate._deps_status)
-        y -= 44
+        # ================================================================== #
+        # Tab 3 — Output
+        # ================================================================== #
+        pane = _make_tab("Output")
+        y = 240
+        from AppKit import NSButton as _NSButton
 
-        cv.addSubview_(_make_label("─" * 62, 20, y, WIN_W - 40, 16))
-        y -= 22
+        pane.addSubview_(_make_label("Transcript Folder", 20, y, 300, 22, bold=True))
+        y -= 36
 
-        # ------------------------------------------------------------------ #
-        # Section 4: Output Folder
-        # ------------------------------------------------------------------ #
-        cv.addSubview_(_make_label("Output Folder", 20, y, 300, 22, bold=True))
-        y -= 30
-
-        current_output = cfg.get("output_dir", str(Path.home() / "meeting-transcripts"))
+        current_output = cfg.get("output_dir", str(Path.home() / "overheard" / "transcripts"))
         self._delegate._output_field = _make_text_field(
-            20, y, 340, 24,
-            placeholder="~/overheard/transcripts/",
+            20, y, PW - 100, 24, placeholder="~/overheard/transcripts/",
         )
         self._delegate._output_field.setStringValue_(current_output)
-        cv.addSubview_(self._delegate._output_field)
+        pane.addSubview_(self._delegate._output_field)
+        pane.addSubview_(_make_button("Browse...", PW - 74, y, 90, 24,
+                                     "browseOutputFolder:", self._delegate))
+        y -= 28
 
-        cv.addSubview_(_make_button(
-            "Browse...", 370, y, 90, 24,
-            "browseOutputFolder:", self._delegate,
-        ))
-        y -= 26
+        self._delegate._output_status = _make_status(20, y, PW)
+        pane.addSubview_(self._delegate._output_status)
+        y -= 40
 
-        self._delegate._output_status = _make_status(20, y)
-        cv.addSubview_(self._delegate._output_status)
-        y -= 30
-
-        from AppKit import NSButton as _NSButton
-        keep_btn = _NSButton.alloc().initWithFrame_(NSMakeRect(20, y, 300, 20))
-        keep_btn.setButtonType_(3)  # NSSwitchButton / checkbox
+        keep_btn = _NSButton.alloc().initWithFrame_(NSMakeRect(20, y, PW, 20))
+        keep_btn.setButtonType_(3)
         keep_btn.setTitle_("Keep audio recordings after transcription")
         keep_btn.setState_(1 if cfg.get("keep_recordings", False) else 0)
         keep_btn.setTarget_(self._delegate)
         keep_btn.setAction_("toggleKeepRecordings:")
-        cv.addSubview_(keep_btn)
+        pane.addSubview_(keep_btn)
         self._delegate._keep_recordings_btn = keep_btn
-        y -= 40
 
-        cv.addSubview_(_make_label("─" * 62, 20, y, WIN_W - 40, 16))
-        y -= 22
+        # ================================================================== #
+        # Tab 4 — Integrations
+        # ================================================================== #
+        pane = _make_tab("Integrations")
+        y = 240
+        obsidian_enabled = bool(cfg.get("obsidian_enabled", False))
 
-        # ------------------------------------------------------------------ #
-        # Section 5: Integrations
-        # ------------------------------------------------------------------ #
-        cv.addSubview_(_make_label("Integrations", 20, y, 300, 22, bold=True))
+        pane.addSubview_(_make_label("Obsidian", 20, y, 300, 22, bold=True))
         y -= 30
 
-        # Obsidian enable checkbox
-        obsidian_enabled = bool(cfg.get("obsidian_enabled", False))
-        obs_check = _NSButton.alloc().initWithFrame_(NSMakeRect(20, y, 300, 20))
+        obs_check = _NSButton.alloc().initWithFrame_(NSMakeRect(20, y, PW, 20))
         obs_check.setButtonType_(3)
         obs_check.setTitle_("Save transcripts to Obsidian vault")
         obs_check.setState_(1 if obsidian_enabled else 0)
         obs_check.setTarget_(self._delegate)
         obs_check.setAction_("toggleObsidian:")
-        cv.addSubview_(obs_check)
+        pane.addSubview_(obs_check)
         self._delegate._obsidian_check = obs_check
-        y -= 30
+        y -= 32
 
-        # Vault path
-        cv.addSubview_(_make_label("Vault path:", 20, y, 90, 20))
-        obs_vault_field = _make_text_field(
-            115, y, WIN_W - 215, 24,
-            placeholder="/Users/you/Documents/MyVault",
-        )
+        pane.addSubview_(_make_label("Vault:", 20, y, 60, 20))
+        obs_vault_field = _make_text_field(84, y, PW - 160, 24,
+                                           placeholder="/Users/you/Documents/MyVault")
         obs_vault_field.setStringValue_(cfg.get("obsidian_vault", ""))
         obs_vault_field.setEnabled_(obsidian_enabled)
-        cv.addSubview_(obs_vault_field)
+        pane.addSubview_(obs_vault_field)
         self._delegate._obsidian_vault_field = obs_vault_field
-
-        obs_browse_btn = _make_button(
-            "Browse...", WIN_W - 94, y, 74, 24,
-            "browseObsidianVault:", self._delegate,
-        )
+        obs_browse_btn = _make_button("Browse...", PW - 70, y, 86, 24,
+                                     "browseObsidianVault:", self._delegate)
         obs_browse_btn.setEnabled_(obsidian_enabled)
-        cv.addSubview_(obs_browse_btn)
+        pane.addSubview_(obs_browse_btn)
         self._delegate._obsidian_browse_btn = obs_browse_btn
         y -= 32
 
-        # Inbox folder
-        cv.addSubview_(_make_label("Inbox folder:", 20, y, 90, 20))
-        obs_inbox_field = _make_text_field(
-            115, y, 200, 24,
-            placeholder="01_Inbox",
-        )
+        pane.addSubview_(_make_label("Inbox:", 20, y, 60, 20))
+        obs_inbox_field = _make_text_field(84, y, 180, 24, placeholder="01_Inbox")
         obs_inbox_field.setStringValue_(cfg.get("obsidian_inbox", "01_Inbox"))
         obs_inbox_field.setEnabled_(obsidian_enabled)
         obs_inbox_field.setTarget_(self._delegate)
         obs_inbox_field.setAction_("saveObsidianInbox:")
-        cv.addSubview_(obs_inbox_field)
+        pane.addSubview_(obs_inbox_field)
         self._delegate._obsidian_inbox_field = obs_inbox_field
-        y -= 32
+        y -= 44
 
-        # Local speaker name (mic attribution)
-        cv.addSubview_(_make_label("Your name:", 20, y, 90, 20))
-        local_speaker_field = _make_text_field(
-            115, y, 200, 24,
-            placeholder="Don",
+        pane.addSubview_(_make_label("Calendar", 20, y, 300, 22, bold=True))
+        y -= 36
+
+        pane.addSubview_(_make_button("Connect Calendar", 20, y, 160, 28,
+                                     "connectCalendar:", self._delegate))
+        self._delegate._calendar_status = _make_status(190, y + 5, PW - 170)
+        self._delegate._calendar_status.setStringValue_(
+            "Autofills meeting name and attendees"
         )
+        pane.addSubview_(self._delegate._calendar_status)
+        y -= 44
+
+        pane.addSubview_(_make_label("Speaker name:", 20, y, 110, 20))
+        local_speaker_field = _make_text_field(134, y, 160, 24, placeholder="Don")
         local_speaker_field.setStringValue_(cfg.get("local_speaker_name", "Don"))
         local_speaker_field.setTarget_(self._delegate)
         local_speaker_field.setAction_("saveLocalSpeakerName:")
-        cv.addSubview_(local_speaker_field)
+        pane.addSubview_(local_speaker_field)
         self._delegate._local_speaker_field = local_speaker_field
-        cv.addSubview_(_make_label("(used for mic channel attribution)", 320, y, 140, 20))
-        y -= 36
-
-        # Calendar access
-        cv.addSubview_(_make_button(
-            "Connect Calendar", 20, y, 160, 28,
-            "connectCalendar:", self._delegate,
-        ))
-        self._delegate._calendar_status = _make_status(190, y + 5)
-        self._delegate._calendar_status.setStringValue_(
-            "Autofills meeting name and attendees from your calendar"
-        )
-        cv.addSubview_(self._delegate._calendar_status)
+        pane.addSubview_(_make_label("(mic attribution)", 300, y, 130, 20))
