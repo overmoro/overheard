@@ -1,23 +1,32 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 44" width="44" height="44">
-  <!-- Speech bubble -->
-  <path d="M 4 6
-           Q 4 3 7 3
-           L 37 3
-           Q 40 3 40 6
-           L 40 28
-           Q 40 31 37 31
-           L 25 31
-           L 20 40
-           L 17 31
-           L 7 31
-           Q 4 31 4 28
-           Z"
-        fill="black"/>
+  <defs>
+    <!-- Mask: white = show bubble fill, black = cut out (transparent) -->
+    <mask id="wavecut">
+      <!-- Fill everything white first (show the bubble) -->
+      <rect width="44" height="44" fill="white"/>
+      <!-- Cut out waveform bars by painting them black -->
+      <rect x="8"    y="12.5" width="3" height="11" rx="1.5" fill="black"/>
+      <rect x="13"   y="9.5"  width="3" height="17" rx="1.5" fill="black"/>
+      <rect x="18"   y="14"   width="3" height="7"  rx="1.5" fill="black"/>
+      <rect x="23"   y="7.5"  width="3" height="21" rx="1.5" fill="black"/>
+      <rect x="28"   y="11.5" width="3" height="13" rx="1.5" fill="black"/>
+      <rect x="33"   y="13"   width="3" height="10" rx="1.5" fill="black"/>
+    </mask>
+  </defs>
 
-  <!-- Waveform cutout — rendered as white so macOS template tinting works -->
-  <rect x="10" y="13" width="3.5" height="12" rx="1.75" fill="white"/>
-  <rect x="15" y="10" width="3.5" height="18" rx="1.75" fill="white"/>
-  <rect x="20" y="15" width="3.5" height="8"  rx="1.75" fill="white"/>
-  <rect x="25" y="8"  width="3.5" height="22" rx="1.75" fill="white"/>
-  <rect x="30" y="12" width="3.5" height="14" rx="1.75" fill="white"/>
+  <!-- Speech bubble with waveform bars cut through it as transparent holes -->
+  <path d="M 3 5
+           Q 3 2 6 2
+           L 38 2
+           Q 41 2 41 5
+           L 41 28
+           Q 41 31 38 31
+           L 25 31
+           L 21 40
+           L 18 31
+           L 6 31
+           Q 3 31 3 28
+           Z"
+        fill="black"
+        mask="url(#wavecut)"/>
 </svg>
