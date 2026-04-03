@@ -17,8 +17,25 @@ OUTPUT_DIR = Path(cfg.get("output_dir", str(Path.home() / "meeting-transcripts")
 
 
 def _build_speaker_map(attendees: list[str]) -> dict[str, str]:
-    """Build {SPEAKER_00: "Name", SPEAKER_01: "Name"} from an ordered attendee list."""
+    """Build {SPEAKER_00: "Name", ...} from an ordered attendee list.
+
+    Keys use whisperx's internal zero-padded format (SPEAKER_00, SPEAKER_01).
+    Display conversion to 'Speaker 1', 'Speaker 2' happens at render time.
+    """
     return {f"SPEAKER_{i:02d}": name for i, name in enumerate(attendees) if name}
+
+
+def _format_speaker(raw: str) -> str:
+    """Convert whisperx label to a readable name.
+
+    SPEAKER_00 → Speaker 1, SPEAKER_01 → Speaker 2, etc.
+    Leaves already-named speakers untouched.
+    """
+    import re
+    m = re.match(r"SPEAKER_(\d+)$", raw)
+    if m:
+        return f"Speaker {int(m.group(1)) + 1}"
+    return raw
 
 
 def transcribe_audio(
@@ -173,11 +190,12 @@ def _write_markdown(
     current_speaker = None
 
     for seg in result.get("segments", []):
-        raw_speaker = seg.get("speaker", "Unknown")
-        # Resolve speaker label to name if mapping exists
-        display_speaker = speaker_map.get(raw_speaker, raw_speaker)
-        if display_speaker and display_speaker != raw_speaker:
-            display_speaker = f"[[{display_speaker}]]"
+        raw_speaker = seg.get("speaker", "SPEAKER_00")
+        # Resolve to attendee name, or fall back to "Speaker 1", "Speaker 2" etc.
+        if raw_speaker in speaker_map:
+            display_speaker = f"[[{speaker_map[raw_speaker]}]]"
+        else:
+            display_speaker = _format_speaker(raw_speaker)
 
         start = seg.get("start", 0)
         text = seg.get("text", "").strip()

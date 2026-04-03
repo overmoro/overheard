@@ -274,8 +274,8 @@ class TranscriberApp(rumps.App):
             mic, sys_lvl = self._recorder.get_levels()
             if self._transport:
                 self._transport.set_levels(mic, sys_lvl)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"DEBUG levels error: {e}", flush=True)
 
     # ------------------------------------------------------------------
     # Helpers

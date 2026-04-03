@@ -229,7 +229,9 @@ class TransportWindow:
             db = 20 * math.log10(max(rms, 1e-9))
             return max(0.0, min(1.0, (db + 60) / 60))
 
-        self._mic_meter.setLevel_(_rms_to_level(mic_rms))
+        level = _rms_to_level(mic_rms)
+        print(f"DEBUG meter: mic_rms={mic_rms:.4f} level={level:.2f}", flush=True)
+        self._mic_meter.setLevel_(level)
         if self._is_multichannel and self._sys_meter is not None:
             self._sys_meter.setLevel_(_rms_to_level(system_rms))
 
