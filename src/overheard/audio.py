@@ -22,15 +22,33 @@ def find_device(name: str) -> int | None:
     return None
 
 
+def _device_has_signal(device_id: int) -> bool:
+    """Quick half-second test to check a device actually captures audio."""
+    try:
+        info = sd.query_devices(device_id)
+        rate = int(info["default_samplerate"])
+        channels = min(info["max_input_channels"], 2)
+        rec = sd.rec(int(0.5 * rate), samplerate=rate, channels=channels,
+                     device=device_id, dtype="float32")
+        sd.wait()
+        return float(np.max(np.abs(rec))) > 0.0
+    except Exception:
+        return False
+
+
 def find_recording_device(preferred: str = DEFAULT_DEVICE_NAME) -> int | None:
-    """Find the best available recording device with fallback chain."""
-    device_id = find_device(preferred)
-    if device_id is not None:
-        return device_id
-    for name in FALLBACK_DEVICES:
+    """Find the best available recording device with fallback chain.
+
+    Tests each candidate for actual signal — skips devices that return silence.
+    """
+    candidates = [preferred] + FALLBACK_DEVICES
+    for name in candidates:
         device_id = find_device(name)
-        if device_id is not None:
+        if device_id is not None and _device_has_signal(device_id):
+            print(f"Audio: using device '{name}' [{device_id}]", file=sys.stderr)
             return device_id
+        elif device_id is not None:
+            print(f"Audio: skipping '{name}' [{device_id}] — no signal", file=sys.stderr)
     return None
 
 
