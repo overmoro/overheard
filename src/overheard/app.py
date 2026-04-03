@@ -48,6 +48,7 @@ class TranscriberApp(rumps.App):
         self._prefs_window = None
         self._details_panel = None
         self._level_timer: rumps.Timer | None = None
+        self._gather_poll_timer: rumps.Timer | None = None
 
     # ------------------------------------------------------------------
     # Menu items
@@ -112,7 +113,7 @@ class TranscriberApp(rumps.App):
 
         self._stop_level_timer()
 
-        # Step 1: stop recorder, get audio + channel info
+        # Stop recorder and grab audio on the calling thread (fast).
         audio, channels_info = self._recorder.stop()
         self._recorder = None
 
@@ -121,67 +122,66 @@ class TranscriberApp(rumps.App):
             rumps.notification("Overheard", "", "No audio captured.")
             return
 
-        # Step 2: save temp WAV
-        import soundfile as sf
-        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        sf.write(tmp.name, audio, SAMPLE_RATE)
-        tmp.close()
-        tmp_path = tmp.name
-
-        self._pending_wav = tmp_path
-        self._pending_channels_info = channels_info
         self._set_state("idle", "Gathering details...")
 
-        # Steps 3-5: do slow work (AppleScript, pgrep) in background,
-        # then schedule the panel show on the main thread via a timer.
-        def _gather_and_show():
-            print("DEBUG: _gather_and_show started", flush=True)
+        # Reset the shared result slot so the poll timer knows nothing is ready yet.
+        self._pending_meeting_meta = None
+        self._pending_wav = None
+        self._pending_channels_info = None
 
-            # Calendar query runs in a daemon thread with a hard join timeout.
-            meeting_info = [None]
-            def _cal_query():
-                print("DEBUG: calendar query starting", flush=True)
+        # Do all slow work (WAV write, Calendar, pgrep) in a daemon thread.
+        def _gather():
+            import soundfile as sf
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            sf.write(tmp.name, audio, SAMPLE_RATE)
+            tmp.close()
+
+            # Calendar — isolated sub-thread with hard join timeout so a
+            # TCC dialog or slow iCloud sync can never block the gather thread.
+            _mi = [None]
+            def _cal():
                 try:
                     from overheard.calendar import get_current_meeting
-                    meeting_info[0] = get_current_meeting()
-                except Exception as e:
-                    print(f"DEBUG: calendar exception: {e}", flush=True)
-                print("DEBUG: calendar query done", flush=True)
-            cal_thread = threading.Thread(target=_cal_query, daemon=True)
-            cal_thread.start()
-            cal_thread.join(timeout=3)
-            print(f"DEBUG: calendar join complete, result={meeting_info[0]}", flush=True)
-            meeting_info = meeting_info[0]
+                    _mi[0] = get_current_meeting()
+                except Exception:
+                    pass
+            _ct = threading.Thread(target=_cal, daemon=True)
+            _ct.start()
+            _ct.join(timeout=3)
+            meeting_info = _mi[0]
 
-            print("DEBUG: running detect_source", flush=True)
             try:
                 from overheard.meeting import detect_source, infer_location
                 source = detect_source()
                 location = infer_location(source)
-            except Exception as e:
-                print(f"DEBUG: detect_source exception: {e}", flush=True)
+            except Exception:
                 source = "in-person"
                 location = ""
 
-            print(f"DEBUG: source={source}, scheduling panel", flush=True)
             cal_name = meeting_info.title if meeting_info else ""
             cal_attendees = meeting_info.attendees if meeting_info else []
             cal_location = (meeting_info.location
                             if (meeting_info and meeting_info.location) else location)
 
+            # Write results — the main-thread poll timer will pick these up.
+            self._pending_channels_info = channels_info
+            self._pending_wav = tmp.name
             self._pending_meeting_meta = (cal_name, source, cal_location, cal_attendees)
 
-            print("DEBUG: starting rumps.Timer", flush=True)
-            t = rumps.Timer(self._show_details_on_main, 0.05)
-            t.start()
-            print("DEBUG: rumps.Timer started", flush=True)
+        threading.Thread(target=_gather, daemon=True).start()
 
-        threading.Thread(target=_gather_and_show, daemon=True).start()
+        # Poll every 200 ms from the main thread until _gather finishes.
+        # This timer is created here, on the main thread, so it fires correctly.
+        self._gather_poll_timer = rumps.Timer(self._poll_gather_done, 0.2)
+        self._gather_poll_timer.start()
 
-    def _show_details_on_main(self, timer):
-        print("DEBUG: _show_details_on_main fired", flush=True)
+    def _poll_gather_done(self, timer):
+        """Main-thread timer — fires until background gather completes."""
+        if self._pending_meeting_meta is None or self._pending_wav is None:
+            return  # not ready yet, wait for next tick
         timer.stop()
-        meta = getattr(self, "_pending_meeting_meta", ("", "in-person", "", []))
+        self._gather_poll_timer = None
+        meta = self._pending_meeting_meta
         cal_name, source, cal_location, cal_attendees = meta
         self._ensure_details_panel()
         self._set_state("idle", "Fill in details...")

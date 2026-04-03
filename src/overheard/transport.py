@@ -150,7 +150,7 @@ class _TransportDelegate(NSObject):
     def onStop_(self, sender):
         cb = self._callbacks.get("stop")
         if cb:
-            threading.Thread(target=cb, daemon=True).start()
+            cb()
 
 
 class TransportWindow:
