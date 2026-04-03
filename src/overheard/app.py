@@ -56,20 +56,15 @@ class TranscriberApp(rumps.App):
         super().__init__("Overheard", icon=icon, template=True, title="")
         self._state = "idle"
         self._recorder: Recorder | None = None
-        self._transport = None   # lazy-init inside rumps run loop
+        self._popover = None     # TransportPopover — built at startup
         self._prefs_window = None
         self._details_panel = None
         self._level_timer: rumps.Timer | None = None
         self._gather_poll_timer: rumps.Timer | None = None
 
     # ------------------------------------------------------------------
-    # Menu items
+    # Menu items (minimal — main UI is the popover)
     # ------------------------------------------------------------------
-
-    @rumps.clicked("Show Controls")
-    def show_controls(self, _):
-        self._ensure_transport()
-        self._transport.show()
 
     @rumps.clicked("Open Transcripts")
     def open_transcripts(self, _):
@@ -79,10 +74,7 @@ class TranscriberApp(rumps.App):
 
     @rumps.clicked("Preferences...")
     def open_preferences(self, _):
-        from overheard.preferences import PreferencesWindow
-        if self._prefs_window is None:
-            self._prefs_window = PreferencesWindow()
-        self._prefs_window.show()
+        self._open_preferences_cb()
 
     # ------------------------------------------------------------------
     # Transport callbacks
@@ -106,9 +98,9 @@ class TranscriberApp(rumps.App):
         self._recorder = Recorder(device_id)
         self._recorder.start()
 
-        # Inform transport panel whether we're multichannel
-        if self._transport:
-            self._transport.configure_channels(self._recorder._is_multichannel)
+        # Inform popover whether we're multichannel
+        if self._popover:
+            self._popover.configure_channels(self._recorder._is_multichannel)
 
         self._set_state("recording", "Recording...")
         self._start_level_timer()
@@ -275,8 +267,8 @@ class TranscriberApp(rumps.App):
         if self._level_timer is not None:
             self._level_timer.stop()
             self._level_timer = None
-        if self._transport:
-            self._transport.set_levels(0.0, 0.0)
+        if self._popover:
+            self._popover.set_levels(0.0, 0.0)
 
     def _update_levels(self, timer):
         if self._recorder is None:
@@ -284,8 +276,8 @@ class TranscriberApp(rumps.App):
             return
         try:
             mic, sys_lvl = self._recorder.get_levels()
-            if self._transport:
-                self._transport.set_levels(mic, sys_lvl)
+            if self._popover:
+                self._popover.set_levels(mic, sys_lvl)
         except Exception as e:
             print(f"DEBUG levels error: {e}", flush=True)
 
@@ -295,8 +287,6 @@ class TranscriberApp(rumps.App):
 
     def _set_state(self, state: str, status: str = "") -> None:
         self._state = state
-        # Idle: just the icon, no title clutter.
-        # Active states: short emoji badge next to the icon.
         titles = {
             "idle":         "",
             "recording":    " \U0001f534",
@@ -304,22 +294,40 @@ class TranscriberApp(rumps.App):
             "transcribing": " \u23f3",
         }
         self.title = titles.get(state, "")
-        if self._transport:
+        if self._popover:
             from overheard.transport import IDLE, RECORDING, PAUSED, TRANSCRIBING
             state_map = {
                 "idle": IDLE, "recording": RECORDING,
                 "paused": PAUSED, "transcribing": TRANSCRIBING,
             }
-            self._transport.set_state(state_map.get(state, IDLE), status)
+            self._popover.set_state(state_map.get(state, IDLE), status)
 
-    def _ensure_transport(self):
-        if self._transport is None:
-            from overheard.transport import TransportWindow
-            self._transport = TransportWindow({
-                "record": self._on_record,
-                "pause":  self._on_pause,
-                "stop":   self._on_stop,
-            })
+    def _build_popover(self):
+        """Build the popover and hook it to the status bar button."""
+        from overheard.popover import TransportPopover
+        self._popover = TransportPopover({
+            "record":           self._on_record,
+            "pause":            self._on_pause,
+            "stop":             self._on_stop,
+            "open_transcripts": lambda: (
+                _output_dir().mkdir(parents=True, exist_ok=True) or
+                os.system(f'open "{_output_dir()}"')
+            ),
+            "preferences":      self._open_preferences_cb,
+        })
+        try:
+            btn = self._status_item.button()
+            self._popover.hook_status_item(btn)
+            # Remove the rumps dropdown menu so left-click shows the popover
+            self._status_item.setMenu_(None)
+        except Exception as e:
+            print(f"Popover hook failed: {e}", flush=True)
+
+    def _open_preferences_cb(self):
+        from overheard.preferences import PreferencesWindow
+        if self._prefs_window is None:
+            self._prefs_window = PreferencesWindow()
+        self._prefs_window.show()
 
     def _on_discard(self):
         """Discard the pending recording without transcribing."""
@@ -369,13 +377,13 @@ def main():
 
     app = TranscriberApp()
 
-    # Auto-open controls once at startup
-    def _open_on_start(timer):
+    # Build popover and hook it to the status bar button once the run loop starts
+    def _init_popover(timer):
         timer.stop()
-        app._ensure_transport()
-        app._transport.show()
+        app._build_popover()
+        app._set_state("idle", "Ready")
 
-    rumps.Timer(_open_on_start, 0.5).start()
+    rumps.Timer(_init_popover, 0.5).start()
 
     app.run()
 
