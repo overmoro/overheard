@@ -316,10 +316,11 @@ class TranscriberApp(rumps.App):
             "preferences":      self._open_preferences_cb,
         })
         try:
-            btn = self._status_item.button()
+            nsstatusitem = self._nsapp.nsstatusitem
+            btn = nsstatusitem.button()
             self._popover.hook_status_item(btn)
             # Remove the rumps dropdown menu so left-click shows the popover
-            self._status_item.setMenu_(None)
+            nsstatusitem.setMenu_(None)
         except Exception as e:
             print(f"Popover hook failed: {e}", flush=True)
 

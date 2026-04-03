@@ -173,12 +173,10 @@ def _label(text: str, x, y, w, h, size=12, bold=False, color=None,
 
 def _sep(y: float) -> NSView:
     """Horizontal 1px separator."""
-    v = NSView.alloc().initWithFrame_(NSMakeRect(0, y, POP_W, 1))
-    v.setWantsLayer_(True)
-    v.layer().setBackgroundColor_(
-        NSColor.separatorColor().CGColor()
-    )
-    return v
+    from AppKit import NSBox
+    box = NSBox.alloc().initWithFrame_(NSMakeRect(0, y, POP_W, 1))
+    box.setBoxType_(2)        # NSSeparator
+    return box
 
 
 def _transport_btn(title: str, x: float, y: float, action: str,
