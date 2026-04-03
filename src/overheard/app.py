@@ -165,31 +165,47 @@ class TranscriberApp(rumps.App):
         tmp.close()
         tmp_path = tmp.name
 
-        # Step 3: query calendar for meeting info
-        try:
-            from overheard.calendar import get_current_meeting
-            meeting_info = get_current_meeting()
-        except Exception:
-            meeting_info = None
+        self._pending_wav = tmp_path
+        self._pending_channels_info = channels_info
+        self._set_state("idle", "Gathering details...")
 
-        # Step 4: detect meeting source
-        try:
-            from overheard.meeting import detect_source, infer_location
-            source = detect_source()
-            location = infer_location(source)
-        except Exception:
-            source = "in-person"
-            location = ""
+        # Steps 3-5: do slow work (AppleScript, pgrep) in background,
+        # then schedule the panel show on the main thread via a timer.
+        def _gather_and_show():
+            try:
+                from overheard.calendar import get_current_meeting
+                meeting_info = get_current_meeting()
+            except Exception:
+                meeting_info = None
 
-        # Step 5: show Details panel
+            try:
+                from overheard.meeting import detect_source, infer_location
+                source = detect_source()
+                location = infer_location(source)
+            except Exception:
+                source = "in-person"
+                location = ""
+
+            cal_name = meeting_info.title if meeting_info else ""
+            cal_attendees = meeting_info.attendees if meeting_info else []
+            cal_location = (meeting_info.location
+                            if (meeting_info and meeting_info.location) else location)
+
+            # Store results for the main-thread callback to use
+            self._pending_meeting_meta = (cal_name, source, cal_location, cal_attendees)
+
+            # Schedule UI on main thread
+            t = rumps.Timer(self._show_details_on_main, 0.05)
+            t.start()
+
+        threading.Thread(target=_gather_and_show, daemon=True).start()
+
+    def _show_details_on_main(self, timer):
+        timer.stop()
+        meta = getattr(self, "_pending_meeting_meta", ("", "in-person", "", []))
+        cal_name, source, cal_location, cal_attendees = meta
         self._ensure_details_panel()
-
-        cal_name = meeting_info.title if meeting_info else ""
-        cal_attendees = meeting_info.attendees if meeting_info else []
-        cal_location = meeting_info.location if (meeting_info and meeting_info.location) else location
-
         self._set_state("idle", "Fill in details...")
-
         self._details_panel.show(
             name=cal_name,
             source=source,
@@ -197,11 +213,6 @@ class TranscriberApp(rumps.App):
             attendees=cal_attendees,
             speaker_count=2,
         )
-
-        # Callback will fire when user clicks "Start Transcription"
-        # We store the tmp path for use in the callback
-        self._pending_wav = tmp_path
-        self._pending_channels_info = channels_info
 
     # ------------------------------------------------------------------
     # Details panel callback

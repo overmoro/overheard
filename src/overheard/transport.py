@@ -286,6 +286,7 @@ class TransportWindow:
         self._mic_meter = _LevelMeterView.alloc().initWithFrame_(
             NSMakeRect(_METER_BAR_X, mic_y, _METER_BAR_W, _METER_H)
         )
+        self._mic_meter.setWantsLayer_(True)
         self._mic_meter.setMeterVisible_(False)
         cv.addSubview_(self._mic_meter)
 
@@ -296,6 +297,7 @@ class TransportWindow:
         self._sys_meter = _LevelMeterView.alloc().initWithFrame_(
             NSMakeRect(_METER_BAR_X, sys_y, _METER_BAR_W, _METER_H)
         )
+        self._sys_meter.setWantsLayer_(True)
         self._sys_meter.setMeterVisible_(False)
         cv.addSubview_(self._sys_meter)
 
