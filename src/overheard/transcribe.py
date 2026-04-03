@@ -86,13 +86,15 @@ def transcribe_audio(
     if status_callback:
         status_callback("Diarizing...")
 
-    diarize_model = whisperx.DiarizationPipeline(
-        use_auth_token=hf_token, device=diarize_device
-    )
-    # Pre-load audio as tensor to bypass torchcodec (broken on PyTorch 2.8+)
+    from pyannote.audio import Pipeline
     import torchaudio
+    diarize_pipeline = Pipeline.from_pretrained(
+        "pyannote/speaker-diarization-3.1", token=hf_token
+    )
+    diarize_pipeline.to(torch.device(diarize_device))
+    # Pre-load audio as tensor to bypass torchcodec (broken on PyTorch 2.8+)
     waveform, sample_rate = torchaudio.load(audio_path)
-    diarize_segments = diarize_model({"waveform": waveform, "sample_rate": sample_rate})
+    diarize_segments = diarize_pipeline({"waveform": waveform, "sample_rate": sample_rate})
     result = whisperx.assign_word_speakers(diarize_segments, result)
 
     if status_callback:
