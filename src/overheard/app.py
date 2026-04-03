@@ -15,6 +15,44 @@ from overheard.audio import Recorder, find_recording_device, DEFAULT_DEVICE_NAME
 from overheard.transcribe import transcribe_audio
 
 
+def _request_notification_permission() -> None:
+    """Request macOS notification permission via UNUserNotificationCenter.
+
+    Called once at startup. On first launch macOS shows the system permission
+    dialog; subsequent launches are silently approved or denied per the stored
+    grant. Safe to call even when PyObjC UserNotifications is unavailable —
+    the exception is swallowed and a warning is printed instead.
+    """
+    try:
+        from UserNotifications import (
+            UNUserNotificationCenter,
+            UNAuthorizationOptionAlert,
+            UNAuthorizationOptionSound,
+            UNAuthorizationOptionBadge,
+        )
+
+        center = UNUserNotificationCenter.currentNotificationCenter()
+        options = (
+            UNAuthorizationOptionAlert
+            | UNAuthorizationOptionSound
+            | UNAuthorizationOptionBadge
+        )
+
+        def _handler(granted, error):
+            if error:
+                print(
+                    f"Notification permission error: {error}",
+                    file=sys.stderr,
+                )
+
+        center.requestAuthorizationWithOptions_completionHandler_(options, _handler)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"Warning: could not request notification permission: {exc}",
+            file=sys.stderr,
+        )
+
+
 def _output_dir() -> Path:
     return Path(cfg.get("output_dir", str(Path.home() / "overheard" / "transcripts")))
 
@@ -156,6 +194,7 @@ class TranscriberApp(rumps.App):
 
 def main():
     _output_dir().mkdir(parents=True, exist_ok=True)
+    _request_notification_permission()
 
     if not os.environ.get("HF_TOKEN"):
         stored = cfg.get("hf_token")
