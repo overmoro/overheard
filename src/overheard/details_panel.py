@@ -133,11 +133,12 @@ class _AttendeeDataSource(NSObject):
 
 class _DetailsDelegate(NSObject):
 
-    def initWithCallback_(self, callback):
+    def initWithCallbacks_(self, callback, discard_callback):
         self = objc.super(_DetailsDelegate, self).init()
         if self is None:
             return None
         self._callback = callback
+        self._discard_callback = discard_callback
         return self
 
     def onStartTranscription_(self, sender):
@@ -169,6 +170,20 @@ class _DetailsDelegate(NSObject):
         if loc:
             self._location_field.setStringValue_(loc)
 
+    def onDiscard_(self, sender):
+        """First click — reveal the red confirm button."""
+        self._confirm_discard_btn.setHidden_(False)
+        sender.setEnabled_(False)
+
+    def onConfirmDiscard_(self, sender):
+        """Second click — actually discard the recording."""
+        self._window.orderOut_(None)
+        # Reset discard button state for next time
+        self._discard_btn.setEnabled_(True)
+        self._confirm_discard_btn.setHidden_(True)
+        if self._discard_callback:
+            self._discard_callback()
+
 
 # ---------------------------------------------------------------------------
 # DetailsPanel
@@ -190,8 +205,9 @@ class DetailsPanel:
     callback receives a MeetingDetails instance.
     """
 
-    def __init__(self, callback):
+    def __init__(self, callback, discard_callback=None):
         self._callback = callback
+        self._discard_callback = discard_callback
         self._window = None
         self._delegate = None
         self._data_source = None
@@ -242,7 +258,7 @@ class DetailsPanel:
         self._window.center()
         self._window.setFloatingPanel_(True)
 
-        self._delegate = _DetailsDelegate.alloc().initWithCallback_(self._callback)
+        self._delegate = _DetailsDelegate.alloc().initWithCallbacks_(self._callback, self._discard_callback)
         self._delegate._window = self._window
         self._data_source = _AttendeeDataSource.alloc().init()
         self._delegate._data_source = self._data_source
@@ -316,7 +332,28 @@ class DetailsPanel:
         self._delegate._table_view = table
         y -= (table_h + 20)
 
-        # ---- Start Transcription button -------------------------------------
+        # ---- Buttons row ----------------------------------------------------
+        # Discard (left)
+        discard_btn = NSButton.alloc().initWithFrame_(NSMakeRect(20, y, 100, 32))
+        discard_btn.setTitle_("🗑 Discard")
+        discard_btn.setBezelStyle_(1)
+        discard_btn.setTarget_(self._delegate)
+        discard_btn.setAction_("onDiscard:")
+        cv.addSubview_(discard_btn)
+        self._delegate._discard_btn = discard_btn
+
+        # Confirm discard — hidden until first click, red destructive style
+        confirm_btn = NSButton.alloc().initWithFrame_(NSMakeRect(128, y, 160, 32))
+        confirm_btn.setTitle_("⚠️ Yes, delete it")
+        confirm_btn.setBezelStyle_(1)
+        confirm_btn.setTarget_(self._delegate)
+        confirm_btn.setAction_("onConfirmDiscard:")
+        confirm_btn.setContentTintColor_(NSColor.systemRedColor())
+        confirm_btn.setHidden_(True)
+        cv.addSubview_(confirm_btn)
+        self._delegate._confirm_discard_btn = confirm_btn
+
+        # Start Transcription (right)
         btn = NSButton.alloc().initWithFrame_(NSMakeRect(WIN_W - 200, y, 180, 32))
         btn.setTitle_("Start Transcription")
         btn.setBezelStyle_(1)

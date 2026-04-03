@@ -307,10 +307,26 @@ class TranscriberApp(rumps.App):
                 "stop":   self._on_stop,
             })
 
+    def _on_discard(self):
+        """Discard the pending recording without transcribing."""
+        tmp_path = getattr(self, "_pending_wav", None)
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        self._pending_wav = None
+        self._pending_channels_info = None
+        self._pending_meeting_meta = None
+        self._set_state("idle", "Ready")
+
     def _ensure_details_panel(self):
         if self._details_panel is None:
             from overheard.details_panel import DetailsPanel
-            self._details_panel = DetailsPanel(callback=self._on_details_confirmed)
+            self._details_panel = DetailsPanel(
+                callback=self._on_details_confirmed,
+                discard_callback=self._on_discard,
+            )
 
 
 def _ensure_homebrew_path() -> None:
