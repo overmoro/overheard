@@ -87,6 +87,9 @@ class TranscriberApp(rumps.App):
             self._start_level_timer()
             return
 
+        if self._state != "idle":
+            return
+
         device_id = find_recording_device()
         if device_id is None:
             rumps.notification(
@@ -95,15 +98,31 @@ class TranscriberApp(rumps.App):
             )
             return
 
-        self._recorder = Recorder(device_id)
-        self._recorder.start()
+        recorder = Recorder(device_id)
+        self._recorder = recorder
 
-        # Inform popover whether we're multichannel
         if self._popover:
-            self._popover.configure_channels(self._recorder._is_multichannel)
-
+            self._popover.configure_channels(recorder._is_multichannel)
         self._set_state("recording", "Recording...")
         self._start_level_timer()
+
+        # Defer stream start to the next run-loop cycle so AppKit finishes
+        # processing the current mouse event before CoreAudio begins firing
+        # its realtime callbacks.  A race between CoreAudio's realtime thread
+        # and AppKit's event unwinding caused intermittent C-level crashes when
+        # recorder.start() was called synchronously inside mouseDown_.
+        def _deferred_start(timer):
+            timer.stop()
+            try:
+                recorder.start()
+            except Exception:
+                import traceback
+                print(f"stream start failed:\n{traceback.format_exc()}", file=sys.stderr)
+                self._recorder = None
+                self._set_state("idle", "Audio error")
+                self._stop_level_timer()
+
+        rumps.Timer(_deferred_start, 0.05).start()
 
     def _on_pause(self):
         if self._state == "recording" and self._recorder:
@@ -279,7 +298,7 @@ class TranscriberApp(rumps.App):
             if self._popover:
                 self._popover.set_levels(mic, sys_lvl)
         except Exception as e:
-            print(f"DEBUG levels error: {e}", flush=True)
+            print(f"levels error: {e}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -303,7 +322,7 @@ class TranscriberApp(rumps.App):
             self._popover.set_state(state_map.get(state, IDLE), status)
 
     def _build_popover(self):
-        """Build the popover and hook it to the status bar button."""
+        """Build the panel and hook it to the status bar button."""
         from overheard.popover import TransportPopover
         self._popover = TransportPopover({
             "record":           self._on_record,
@@ -319,7 +338,6 @@ class TranscriberApp(rumps.App):
             nsstatusitem = self._nsapp.nsstatusitem
             btn = nsstatusitem.button()
             self._popover.hook_status_item(btn)
-            # Remove the rumps dropdown menu so left-click shows the popover
             nsstatusitem.setMenu_(None)
         except Exception as e:
             print(f"Popover hook failed: {e}", flush=True)
@@ -366,6 +384,8 @@ def _ensure_homebrew_path() -> None:
 
 
 def main():
+    import faulthandler
+    faulthandler.enable()   # print C-level backtraces to stderr on crash
     _ensure_homebrew_path()
     _output_dir().mkdir(parents=True, exist_ok=True)
 

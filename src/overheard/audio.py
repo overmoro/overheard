@@ -42,16 +42,16 @@ def _device_has_signal(device_id: int) -> bool:
 def find_recording_device(preferred: str = DEFAULT_DEVICE_NAME) -> int | None:
     """Find the best available recording device with fallback chain.
 
-    Tests each candidate for actual signal — skips devices that return silence.
+    Uses the first device found by name — no signal test.
+    Signal testing was unreliable: BlackHole is silent when nothing plays,
+    and aggregate devices may return zeros on first TCC access.
     """
-    candidates = [preferred] + FALLBACK_DEVICES
-    for name in candidates:
+    for name in [preferred] + FALLBACK_DEVICES:
         device_id = find_device(name)
-        if device_id is not None and _device_has_signal(device_id):
+        if device_id is not None:
             print(f"Audio: using device '{name}' [{device_id}]", file=sys.stderr)
             return device_id
-        elif device_id is not None:
-            print(f"Audio: skipping '{name}' [{device_id}] — no signal", file=sys.stderr)
+        print(f"Audio: device '{name}' not found", file=sys.stderr)
     return None
 
 
@@ -81,14 +81,18 @@ class Recorder:
 
     def __init__(self, device_id: int, sample_rate: int = SAMPLE_RATE, channels: int = CHANNELS):
         self.device_id = device_id
-        self.sample_rate = sample_rate
 
-        # Detect actual channel count from device
+        # Detect actual channel count and native sample rate from device.
+        # CoreAudio aggregate devices do not support rate conversion — opening
+        # at a non-native rate crashes PortAudio at the C level.  Record at
+        # the device's native rate; WhisperX resamples to 16 kHz on load.
         try:
             info = sd.query_devices(device_id)
             avail = info["max_input_channels"]
+            self.sample_rate = int(info["default_samplerate"])
         except Exception:
             avail = 1
+            self.sample_rate = sample_rate
 
         if avail >= self._MIN_MULTICHANNEL:
             self.channels = avail

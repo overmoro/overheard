@@ -110,6 +110,19 @@ class _PreferencesDelegate(NSObject):
         self._window = window
         return self
 
+    # ---- General -----------------------------------------------------------
+
+    def openTranscripts_(self, sender):
+        from overheard import config as _cfg
+        from pathlib import Path as _Path
+        d = _Path(_cfg.get("output_dir", str(_Path.home() / "overheard" / "transcripts")))
+        d.mkdir(parents=True, exist_ok=True)
+        os.system(f'open "{d}"')
+
+    def quitApp_(self, sender):
+        import rumps
+        rumps.quit_application()
+
     # ---- Audio Setup -------------------------------------------------------
 
     def createRecordingDevice_(self, sender):
@@ -353,7 +366,29 @@ class PreferencesWindow:
         BOTTOM = 20       # y baseline inside each pane
 
         # ================================================================== #
-        # Tab 1 — Audio
+        # Tab 1 — General
+        # ================================================================== #
+        pane = _make_tab("General")
+        y = 240
+
+        pane.addSubview_(_make_label("Transcripts", 20, y, 300, 22, bold=True))
+        y -= 36
+
+        pane.addSubview_(_make_button(
+            "Open Transcripts Folder  ↗", 20, y, 220, 28,
+            "openTranscripts:", self._delegate,
+        ))
+        y -= 60
+
+        pane.addSubview_(_make_label("Application", 20, y, 300, 22, bold=True))
+        y -= 36
+
+        quit_btn = _make_button("Quit Overheard", 20, y, 160, 28,
+                                "quitApp:", self._delegate)
+        pane.addSubview_(quit_btn)
+
+        # ================================================================== #
+        # Tab 2 — Audio
         # ================================================================== #
         pane = _make_tab("Audio")
         y = 240
