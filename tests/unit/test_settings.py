@@ -7,6 +7,7 @@ restate a default, and that the two keys which previously had two different
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -136,3 +137,30 @@ class TestCoercion:
         reloaded = json.loads((isolated_config / "config.json").read_text())
         assert reloaded["speaker_match_threshold"] == 0.70
         assert reloaded["live_preview"] is False
+
+
+class TestTheReadmeDocumentsEverySetting:
+    def test_the_readme_table_lists_every_key_and_no_others(self):
+        """The README is documentation, not a second declaration.
+
+        Presence is checked here because a stale or incomplete key list is
+        data the README can get wrong. Values are not checked, and the
+        Default column is gone, because printing them here would just be a
+        second place for a default to drift out of step with settings.py.
+        """
+        readme = Path(__file__).resolve().parents[2] / "README.md"
+        lines = readme.read_text().splitlines()
+
+        header_index = lines.index("| Key | Description |")
+        assert "Default" not in lines[header_index]
+
+        documented = set()
+        for line in lines[header_index + 1:]:
+            if not line.startswith("|"):
+                break
+            if line.startswith("|---"):
+                continue
+            key = line.split("`")[1]
+            documented.add(key)
+
+        assert documented == set(settings.DEFAULTS)

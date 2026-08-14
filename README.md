@@ -67,16 +67,25 @@ recording. Speakers without a name are numbered in order of first speech.
 ## Configuration
 
 Settings live in `~/.config/overheard/config.json` and the Preferences window.
+Every key, its type and its default value are declared in one place,
+`src/overheard/settings.py`; the Preferences window shows the values in force.
 
-| Key | Default | Description |
-|---|---|---|
-| `engine` | `parakeet` | `parakeet` (GPU) or `whisper` (CPU, 99 languages) |
-| `capture_backend` | `auto` | `auto`, `tap`, or `device` |
-| `diarizer` | `auto` | `auto`, `fluidaudio`, or `pyannote` |
-| `live_preview` | `true` | Show the running transcript while recording |
-| `output_dir` | `~/overheard/transcripts` | Where transcripts are written |
-| `local_speaker_name` | `Don` | Name given to the voice on your microphone |
-| `keep_recordings` | `false` | Keep the audio alongside the transcript |
+| Key | Description |
+|---|---|
+| `engine` | `parakeet` (GPU) or `whisper` (CPU, 99 languages) |
+| `capture_backend` | `auto`, `tap`, or `device` |
+| `diarizer` | `auto`, `fluidaudio`, or `pyannote` |
+| `live_preview` | Show the running transcript while recording |
+| `live_speakers` | Label speakers in the live transcript using streaming diarization |
+| `output_dir` | Where transcripts are written |
+| `obsidian_enabled` | Write transcripts into an Obsidian vault instead of output_dir |
+| `obsidian_vault` | Path to the Obsidian vault, when obsidian_enabled is set |
+| `obsidian_inbox` | Folder within the vault transcripts are written to |
+| `local_speaker_name` | Name given to the voice on your microphone |
+| `speaker_memory` | Remember voices between meetings so returning speakers are recognised |
+| `speaker_match_threshold` | Cosine similarity required to treat a voice as a known person |
+| `keep_recordings` | Keep the audio alongside the transcript |
+| `hf_token` | Hugging Face token, consulted only by the optional pyannote fallback |
 
 No environment variables are required. `HF_TOKEN` is consulted only if you
 deliberately select the `pyannote` diarizer.
