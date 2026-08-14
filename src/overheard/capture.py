@@ -205,16 +205,23 @@ class TapRecorder:
         frame_bytes = self.channels * 4
         want = _READ_FRAMES * frame_bytes
 
+        buffer = b""
         while self._stop_event is not None and not self._stop_event.is_set():
             data = proc.stdout.read(want)
             if not data:
                 break
-            # A short read can split a frame; drop the remainder rather than
-            # letting the channel interleave slip permanently out of phase.
-            usable = len(data) - (len(data) % frame_bytes)
+
+            # A pipe read returns whatever bytes are available, which is often
+            # a partial frame. The leftover must be carried into the next read:
+            # discarding it would shift every following sample by part of a
+            # frame, permanently swapping the mic and system channels for the
+            # rest of the recording.
+            buffer += data
+            usable = len(buffer) - (len(buffer) % frame_bytes)
             if usable <= 0:
                 continue
-            block = np.frombuffer(data[:usable], dtype=np.float32).reshape(-1, self.channels)
+            block = np.frombuffer(buffer[:usable], dtype=np.float32).reshape(-1, self.channels)
+            buffer = buffer[usable:]
 
             if self._paused:
                 continue

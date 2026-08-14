@@ -36,6 +36,9 @@ CONTEXT_SIZE = (256, 256)
 # Maximum backlog before the oldest audio is dropped, in chunks
 MAX_QUEUE_CHUNKS = 32
 
+# Granularity of the per-track energy log used for local-speaker attribution
+ENERGY_BUCKET_SECONDS = 0.5
+
 
 def is_available() -> bool:
     """Return True if the streaming backend can be imported."""
@@ -101,6 +104,8 @@ class LiveDiarizer:
     def __init__(self):
         self._proc: subprocess.Popen | None = None
         self._reader: threading.Thread | None = None
+        self._writer: threading.Thread | None = None
+        self._outbox: queue.Queue = queue.Queue(maxsize=MAX_QUEUE_CHUNKS)
         self._lock = threading.Lock()
         self._segments: list[tuple[float, float, int]] = []
         self._failed = False
@@ -130,18 +135,38 @@ class LiveDiarizer:
 
         self._reader = threading.Thread(target=self._read, daemon=True)
         self._reader.start()
+        self._writer = threading.Thread(target=self._write, daemon=True)
+        self._writer.start()
         return True
 
     def feed(self, mono16k: np.ndarray) -> None:
-        """Send 16 kHz mono audio. Never blocks the caller for long."""
-        proc = self._proc
-        if proc is None or proc.stdin is None:
+        """Queue 16 kHz mono audio for the diarizer. Never blocks.
+
+        The caller is the thread draining capture output. Writing to the
+        helper's stdin directly would let a slow diarizer fill its pipe, stall
+        that thread, and back the pressure up until the capture helper drops
+        real audio. Live labels are a convenience; the recording is not.
+        """
+        if self._proc is None:
             return
         try:
-            proc.stdin.write(mono16k.astype(np.float32).tobytes())
-        except (BrokenPipeError, ValueError, OSError):
-            self._failed = True
-            self._proc = None
+            self._outbox.put_nowait(mono16k.astype(np.float32).tobytes())
+        except queue.Full:
+            pass   # fall behind rather than slow the recording down
+
+    def _write(self) -> None:
+        while True:
+            payload = self._outbox.get()
+            if payload is None:
+                return
+            proc = self._proc
+            if proc is None or proc.stdin is None:
+                return
+            try:
+                proc.stdin.write(payload)
+            except (BrokenPipeError, ValueError, OSError):
+                self._failed = True
+                return
 
     def speaker_at(self, when: float) -> int | None:
         """Speaker index active at a point in time, or None."""
@@ -156,6 +181,13 @@ class LiveDiarizer:
         self._proc = None
         if proc is None:
             return
+        try:
+            self._outbox.put_nowait(None)   # release the writer thread
+        except queue.Full:
+            pass
+        if self._writer:
+            self._writer.join(timeout=2.0)
+            self._writer = None
         try:
             if proc.stdin:
                 proc.stdin.close()      # EOF makes the helper finalize cleanly
@@ -180,11 +212,13 @@ class LiveDiarizer:
             start, end = float(msg["start"]), float(msg["end"])
             speaker = int(msg["speaker"])
             with self._lock:
-                # Tentative segments get revised, so replace any overlapping
-                # entry from the same speaker rather than accumulating dupes.
+                # Sortformer re-emits a segment each chunk as its end time
+                # grows, so supersede any overlapping entry from the same
+                # speaker. Matching only identical starts let every revision
+                # accumulate, leaving tens of thousands of entries in an hour.
                 self._segments = [
                     s for s in self._segments
-                    if not (s[2] == speaker and s[0] == start)
+                    if not (s[2] == speaker and s[1] >= start and s[0] <= end)
                 ]
                 self._segments.append((start, end, speaker))
 
@@ -210,10 +244,15 @@ class LiveTranscriber:
         self._status = "Loading model..."
         self._ready = False
 
-        # Per-chunk energy on each track, used to tell the local speaker apart
-        # from the remote side. With separate tracks this is a direct
-        # measurement rather than the inference it would be on a mixed signal.
-        self._energy: list[tuple[float, float, float, float]] = []
+        # Per-track energy, used to tell the local speaker apart from the
+        # remote side. With separate tracks this is a direct measurement rather
+        # than the inference it would be on a mixed signal.
+        #
+        # Accumulated into fixed buckets rather than one entry per audio block:
+        # at 48 kHz with 1024-frame blocks that would be 47 entries a second,
+        # and the panel rescans this on every poll for every sentence.
+        self._energy: list[tuple[float, float]] = []
+        self._bucket_index: list[int] = []
         self._elapsed = 0.0
         self.diarizer: LiveDiarizer | None = None
 
@@ -243,11 +282,20 @@ class LiveTranscriber:
         Near 1.0 means the local speaker, near 0.0 the remote side. Returns 0.5
         when there is nothing to judge by, so neither side is favoured.
         """
+        import bisect
+
+        first = max(0, int(start // ENERGY_BUCKET_SECONDS))
+        last = int(end // ENERGY_BUCKET_SECONDS)
+
         mic_total = system_total = 0.0
         with self._lock:
-            for chunk_start, chunk_end, mic, system in self._energy:
-                if chunk_end <= start or chunk_start >= end:
-                    continue
+            # Buckets are appended in time order, so the relevant slice is
+            # found by index rather than by scanning the whole session.
+            lo = bisect.bisect_left(self._bucket_index, first)
+            for position in range(lo, len(self._bucket_index)):
+                if self._bucket_index[position] > last:
+                    break
+                mic, system = self._energy[position]
                 mic_total += mic
                 system_total += system
         total = mic_total + system_total
@@ -307,9 +355,14 @@ class LiveTranscriber:
         mic = float(np.sum(block[:, mic_ch] ** 2))
         system = float(np.sum(block[:, sys_chs].mean(axis=1) ** 2))
         with self._lock:
-            start = self._elapsed
+            bucket = int(self._elapsed // ENERGY_BUCKET_SECONDS)
             self._elapsed += duration
-            self._energy.append((start, self._elapsed, mic, system))
+            if self._bucket_index and self._bucket_index[-1] == bucket:
+                previous_mic, previous_system = self._energy[-1]
+                self._energy[-1] = (previous_mic + mic, previous_system + system)
+            else:
+                self._bucket_index.append(bucket)
+                self._energy.append((mic, system))
 
     def stop(self, timeout: float = 3.0) -> str:
         """Stop the worker and return the final live transcript."""

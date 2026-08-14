@@ -28,6 +28,22 @@ final class CaptureSession {
 
     /// Guards `micFirst` / `expectedBuffers`, which the IOProc reads.
     private let lock = NSLock()
+
+    /// Audio handed from the IOProc to the writer thread.
+    ///
+    /// The IOProc runs on a Core Audio realtime thread. Writing to stdout there
+    /// would block whenever the reader falls behind and the pipe fills, and a
+    /// stalled realtime thread is what trips Core Audio's watchdog. Buffering
+    /// under a lock and draining on a normal thread keeps the callback bounded.
+    private let bufferLock = NSLock()
+    private var outgoing = [Float]()
+    private var writerThread: Thread?
+    private var draining = true
+
+    /// Roughly ten seconds of stereo audio at 48 kHz. Past this the consumer
+    /// has stopped for good, and dropping is better than growing without end.
+    private let maxBufferedSamples = 48_000 * 2 * 10
+    private var reportedOverflow = false
     private var micFirst = false
     private var expectedBuffers = 0
     private var reportedMismatch = false
@@ -174,6 +190,12 @@ final class CaptureSession {
         guard status == noErr, procID != nil else {
             Status.fatal("Could not create IOProc (status \(status))", code: "ioproc_failed")
         }
+        let writer = Thread { [weak self] in self?.writeLoop() }
+        writer.name = "overheard.capture.writer"
+        writer.qualityOfService = .userInitiated
+        writer.start()
+        writerThread = writer
+
         guard AudioDeviceStart(aggregateID, procID!) == noErr else {
             Status.fatal("Could not start capture", code: "start_failed")
         }
@@ -244,7 +266,38 @@ final class CaptureSession {
             }
         }
 
-        interleaved.withUnsafeBufferPointer { out.write(Data(buffer: $0)) }
+        bufferLock.lock()
+        if outgoing.count + interleaved.count > maxBufferedSamples {
+            let overflowed = !reportedOverflow
+            reportedOverflow = true
+            bufferLock.unlock()
+            if overflowed {
+                Status.emit("warning", ["message": "Output backlog full, dropping audio"])
+            }
+            return
+        }
+        outgoing.append(contentsOf: interleaved)
+        bufferLock.unlock()
+    }
+
+    /// Drains buffered audio to stdout, off the realtime thread.
+    private func writeLoop() {
+        while true {
+            bufferLock.lock()
+            let batch = outgoing
+            outgoing.removeAll(keepingCapacity: true)
+            let keepGoing = draining
+            bufferLock.unlock()
+
+            if !batch.isEmpty {
+                batch.withUnsafeBufferPointer { out.write(Data(buffer: $0)) }
+            } else if !keepGoing {
+                return
+            } else {
+                // Nothing ready; yield rather than spin.
+                Thread.sleep(forTimeInterval: 0.005)
+            }
+        }
     }
 
     private func reportMismatchOnce(got: Int, expected: Int) {
@@ -275,6 +328,19 @@ final class CaptureSession {
             AudioHardwareDestroyProcessTap(tapID)
             tapID = 0
         }
+
+        // Let the writer flush what the IOProc already handed over.
+        bufferLock.lock()
+        draining = false
+        bufferLock.unlock()
+        for _ in 0..<200 {
+            bufferLock.lock()
+            let remaining = outgoing.count
+            bufferLock.unlock()
+            if remaining == 0 { break }
+            Thread.sleep(forTimeInterval: 0.005)
+        }
+        writerThread = nil
         try? out.synchronize()
     }
 

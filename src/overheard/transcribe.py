@@ -62,7 +62,14 @@ def _build_speaker_map(
     claimed = {name.strip().casefold() for name in known.values()}
     remaining = [a for a in attendees if a and a.strip().casefold() not in claimed]
 
-    if local_labels and mic_speaker and local_labels[0] not in mapping:
+    # Also guard against handing out a name the library already claimed for a
+    # different voice, which would show one person as two speakers.
+    if (
+        local_labels
+        and mic_speaker
+        and local_labels[0] not in mapping
+        and mic_speaker.strip().casefold() not in claimed
+    ):
         mapping[local_labels[0]] = mic_speaker
         # Don't hand the local speaker's name out twice if they're also listed
         remaining = [
@@ -110,6 +117,41 @@ def _check_audio_signal(audio_path: str) -> None:
             "microphone access in System Settings, and that the meeting audio "
             "was playing through your selected output device."
         )
+
+
+def _warn_silent_tracks(tracks: list[dict]) -> None:
+    """Warn when one track is silent while another has signal.
+
+    The whole-file signal check cannot catch this: with the system track
+    carrying a meeting, a muted microphone still leaves plenty of overall
+    signal, and the transcript comes out looking fine while missing everything
+    the user said. Worth saying loudly, but not worth discarding the half of
+    the conversation that did record, so this warns rather than raises.
+    """
+    import numpy as np
+    import soundfile as sf
+
+    if len(tracks) < 2:
+        return
+
+    levels = {}
+    for track in tracks:
+        try:
+            data, _ = sf.read(track["path"], dtype="float32")
+        except Exception:
+            return
+        levels[track["label"]] = float(np.sqrt(np.mean(data ** 2))) if len(data) else 0.0
+
+    for label, rms in levels.items():
+        others = [v for k, v in levels.items() if k != label]
+        if rms < 0.0001 and any(other > 0.001 for other in others):
+            source = ("microphone" if label == "mic" else "system audio")
+            print(
+                f"[overheard] the {label} track is silent while the other has signal. "
+                f"Check that the {source} is not muted; nothing from that side "
+                "will appear in this transcript.",
+                file=sys.stderr,
+            )
 
 
 def _split_tracks(audio_path: str, channels_info: dict | None) -> list[dict]:
@@ -641,6 +683,7 @@ def transcribe_audio(
     _check_audio_signal(audio_path)
 
     tracks = _split_tracks(audio_path, channels_info)
+    _warn_silent_tracks(tracks)
     prefixes = {"mic": "MIC", "system": "SYS", "mixed": "SPEAKER"}
     results: dict[str, dict] = {}
 
@@ -745,14 +788,43 @@ def transcribe_audio(
         speaker_map=speaker_map,
     )
 
-    # Learn the voices that ended up with real names, so the next meeting can
-    # recognise them without an attendee list.
+    # Learn voices, but only from sources that are actually knowledge.
+    #
+    # Names assigned by attendee order are a convention, not a fact. Storing one
+    # would launder a guess into evidence: a library match outranks every other
+    # signal, so a single wrong ordering would attach the wrong name to a voice
+    # and then reapply it confidently to every future meeting, with nothing to
+    # correct it. Only the local speaker, known from the mic track, and voices
+    # the library already recognised are safe to learn.
     if library is not None and label_embeddings:
-        for label, name in speaker_map.items():
+        confident = set(known)
+        if local_labels and mic_speaker:
+            confident.add(local_labels[0])
+
+        # A remote voice is safe to learn when the assignment could not have
+        # been anything else: one unidentified remote speaker, one unclaimed
+        # attendee. That covers the common two-person call. With two of each,
+        # the pairing came from speech order and is exactly the guess this
+        # block must not store.
+        unknown_remote = [
+            label for label in remote_labels
+            if label not in known and speaker_map.get(label)
+        ]
+        used = {speaker_map[label].strip().casefold() for label in confident
+                if speaker_map.get(label)}
+        unclaimed = [a for a in attendees if a and a.strip().casefold() not in used]
+        if len(unknown_remote) == 1 and len(unclaimed) == 1:
+            confident.add(unknown_remote[0])
+
+        learned = False
+        for label in confident:
+            name = speaker_map.get(label)
             embedding = label_embeddings.get(label)
-            if embedding and name:
+            if name and embedding:
                 library.remember(name, embedding)
-        library.save()
+                learned = True
+        if learned:
+            library.save()
 
     return output_path
 
