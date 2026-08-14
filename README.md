@@ -1,89 +1,107 @@
 # Overheard
 
-Local macOS menu bar app that records meetings and produces diarized markdown transcripts. No cloud services — runs entirely on your machine using WhisperX and pyannote.
+Local macOS menu bar app that records meetings and produces diarized markdown
+transcripts. Nothing leaves your machine, and it needs no accounts or API keys.
 
 ## What it does
 
 - Sits in your menu bar with a start/stop toggle
-- Records from a combined system audio + microphone device
-- Transcribes with WhisperX (Whisper large-v3)
-- Diarizes speakers with pyannote
-- Outputs a timestamped markdown file to `~/meeting-transcripts/`
+- Captures system audio and your microphone as separate tracks, using Core Audio
+  process taps. No virtual audio driver, and nothing to reconfigure before a call
+- Transcribes with NVIDIA Parakeet TDT v3 on the Apple Silicon GPU
+- Labels speakers with FluidAudio on the Neural Engine
+- Shows a running transcript while the meeting is in progress
+- Writes a timestamped markdown file, optionally straight into an Obsidian vault
 
 ## Requirements
 
-- macOS (Apple Silicon recommended)
+- macOS 14.4 or later, Apple Silicon
 - Python 3.10+
-- [Hugging Face](https://huggingface.co/) account with [pyannote model access](https://huggingface.co/pyannote/speaker-diarization-3.1) accepted
-- BlackHole 2ch (virtual audio driver)
 
-## Quick Start
+That is the whole list. Models download on first use.
+
+## Quick start
 
 ```bash
-# 1. Install system dependencies
-./scripts/setup-macos.sh
-
-# 2. Install the Python package
 pip install -e .
-
-# 3. Set your Hugging Face token
-export HF_TOKEN=your_token_here  # add to ~/.zshrc
-
-# 4. Run
 overheard
 ```
 
-## Audio Setup
+The first time you press Record, macOS asks for microphone access. Grant it: the
+microphone is also the clock source for capture, so it is needed even when only
+recording system audio.
 
-You need two virtual devices configured in **Audio MIDI Setup** (search Spotlight):
+## How capture works
 
-### Aggregate Device (for recording)
+Overheard uses Core Audio process taps, added in macOS 14.4. It records whatever
+your Mac is playing, alongside your microphone, without routing your audio
+through a virtual device first. There is nothing to install and nothing to switch
+back afterwards.
 
-This combines your mic and system audio into a single input:
+The two sides are kept as separate tracks and transcribed independently. That
+means the app knows which voice is yours rather than guessing, and it avoids
+mixing your microphone against the system audio it is echoing when you use
+speakers instead of headphones.
 
-1. Click **+** → **Create Aggregate Device**
-2. Rename to **Meeting Capture**
-3. Check **BlackHole 2ch** and **MacBook Pro Microphone**
-4. Set **BlackHole 2ch** as the clock source
+On macOS earlier than 14.4, Overheard falls back to recording from a normal input
+device. For combined capture on those systems you still need BlackHole and an
+aggregate device named **Meeting Capture**; `./scripts/setup-macos.sh` sets that
+up.
 
-### Multi-Output Device (for monitoring)
+## Output
 
-This sends system audio to both your speakers and BlackHole:
-
-1. Click **+** → **Create Multi-Output Device**
-2. Check **MacBook Pro Speakers** and **BlackHole 2ch**
-3. In **System Settings → Sound → Output**, select this Multi-Output Device before meetings
-
-## Output Format
-
-Files are saved to `~/meeting-transcripts/` as:
-
-```
-2026-04-02_1430_meeting.md
-```
+Each transcript opens with YAML frontmatter (type, date, source, attendees,
+status) and a dated heading, followed by the body:
 
 ```markdown
-# Meeting — 2 April 2026, 2:30pm
+**[[Don Reddin]]** [00:00:12]
+Thanks for joining...
 
-**SPEAKER_00:** [00:00:12] Thanks for joining...
-**SPEAKER_01:** [00:00:15] Of course, good to be here...
+**[[Sarah Kelly]]** [00:00:15]
+Of course, good to be here...
 ```
+
+Attendee names come from your calendar entry or the details panel shown after
+recording. Speakers without a name are numbered in order of first speech.
 
 ## Configuration
 
-| Environment Variable | Required | Description |
-|---|---|---|
-| `HF_TOKEN` | Yes | Hugging Face access token for pyannote models |
+Settings live in `~/.config/overheard/config.json` and the Preferences window.
 
-The app looks for an audio device named **Meeting Capture** by default, falling back to **BlackHole** then **MacBook Pro Microphone**.
+| Key | Default | Description |
+|---|---|---|
+| `engine` | `parakeet` | `parakeet` (GPU) or `whisper` (CPU, 99 languages) |
+| `capture_backend` | `auto` | `auto`, `tap`, or `device` |
+| `diarizer` | `auto` | `auto`, `fluidaudio`, or `pyannote` |
+| `live_preview` | `true` | Show the running transcript while recording |
+| `output_dir` | `~/overheard/transcripts` | Where transcripts are written |
+| `local_speaker_name` | `Don` | Name given to the voice on your microphone |
+| `keep_recordings` | `false` | Keep the audio alongside the transcript |
+
+No environment variables are required. `HF_TOKEN` is consulted only if you
+deliberately select the `pyannote` diarizer.
+
+### Optional extras
+
+```bash
+pip install -e '.[whisper]'    # WhisperX, for the CPU engine
+pip install -e '.[pyannote]'   # pyannote fallback diarizer, pulls in torch
+```
 
 ## Development
 
+The native helper provides Core Audio capture and diarization. A prebuilt,
+ad-hoc-signed binary is committed to `Resources/`, so this is only needed if you
+change `helper/`:
+
 ```bash
-git clone <repo-url>
-cd overheard
-pip install -e .
-overheard
+./scripts/build-helper.sh
+```
+
+Building the menu bar app itself:
+
+```bash
+./build_app.sh
 ```
 
 ## License

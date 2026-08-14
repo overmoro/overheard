@@ -16,6 +16,24 @@ DEFAULTS = {
     "obsidian_vault": "",
     "obsidian_inbox": "01_Inbox",
     "local_speaker_name": "Don",
+    # Transcription engine: "parakeet" (MLX, GPU) or "whisper" (WhisperX, CPU)
+    "engine": "parakeet",
+    # Show a running transcript while recording (parakeet engine only)
+    "live_preview": True,
+    # Capture backend: "auto" (tap when available), "tap", or "device"
+    "capture_backend": "auto",
+    # Diarizer: "auto" (FluidAudio, falling back to pyannote), "fluidaudio",
+    # or "pyannote". pyannote needs HF_TOKEN and the optional extra installed.
+    "diarizer": "auto",
+    # Label speakers in the live transcript using streaming diarization.
+    # Needs separate mic and system tracks; at most four concurrent speakers.
+    "live_speakers": True,
+    # Remember voices between meetings so returning speakers are recognised
+    # without relying on the attendee list order.
+    "speaker_memory": True,
+    # Cosine similarity required to treat a voice as a known person. Raise it
+    # if wrong names appear; lower it if returning speakers go unrecognised.
+    "speaker_match_threshold": 0.70,
 }
 
 

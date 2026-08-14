@@ -1,7 +1,7 @@
 """Preferences window for Overheard.
 
 Opens as a standalone NSPanel so it doesn't block the rumps run loop.
-Sections: Audio Setup, Hugging Face Token, Dependencies, Output Folder.
+Sections: General, Audio, Transcription, Output, Integrations.
 """
 
 import os
@@ -32,7 +32,18 @@ from overheard.audio import create_aggregate_device, create_multi_output_device
 
 # Window dimensions
 WIN_W = 500
-WIN_H = 360   # tabs keep each pane compact
+WIN_H = 460   # tall enough for the Transcription pane's engine picker
+
+# Engine choice, in popup-menu order
+_ENGINES = ["parakeet", "whisper"]
+_ENGINE_TITLES = [
+    "Parakeet TDT 0.6B v3 (fast, on GPU)",
+    "Whisper large-v3 (slower, on CPU)",
+]
+_ENGINE_BLURB = {
+    "parakeet": "Runs on the Apple Silicon GPU. Supports live transcription.",
+    "whisper": "Runs on CPU, far slower, but handles 99 languages.",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +109,7 @@ def _make_text_field(x: float, y: float, w: float, h: float,
 
 
 # ---------------------------------------------------------------------------
-# Delegate — NSObject subclass handles all button actions
+# Delegate: NSObject subclass handles all button actions
 # ---------------------------------------------------------------------------
 
 class _PreferencesDelegate(NSObject):
@@ -141,17 +152,51 @@ class _PreferencesDelegate(NSObject):
         ok, msg = create_multi_output_device()
         self._multiout_status.setStringValue_(f"{'✓' if ok else '✗'} {msg}")
 
-    # ---- HF Token ----------------------------------------------------------
+    # ---- Engine ------------------------------------------------------------
 
-    def saveToken_(self, sender):
-        token = self._token_field.stringValue().strip()
-        if not token:
-            self._token_status.setStringValue_("✗ Token is empty")
+    def selectEngine_(self, sender):
+        """Radio-style engine selection driven by the popup button."""
+        engine = "whisper" if sender.indexOfSelectedItem() == 1 else "parakeet"
+        cfg.set_value("engine", engine)
+        self._engine_status.setStringValue_(_ENGINE_BLURB[engine])
+        # Live preview is streamed by Parakeet, so it's meaningless on Whisper
+        self._live_check.setEnabled_(engine == "parakeet")
+
+    def toggleLivePreview_(self, sender):
+        cfg.set_value("live_preview", bool(sender.state()))
+
+    # ---- Speakers ----------------------------------------------------------
+
+    def toggleSpeakerMemory_(self, sender):
+        cfg.set_value("speaker_memory", bool(sender.state()))
+
+    def _refresh_speakers(self):
+        """Reload the known-voices popup from the library on disk."""
+        from overheard.speakers import SpeakerLibrary
+
+        known = SpeakerLibrary().describe()
+        self._speakers_popup.removeAllItems()
+        if known:
+            self._speakers_popup.addItemsWithTitles_(
+                [f"{name}  ({samples} recording{'s' if samples != 1 else ''})"
+                 for name, samples, _ in known]
+            )
+            self._known_speaker_names = [name for name, _, _ in known]
+        else:
+            self._speakers_popup.addItemWithTitle_("No voices remembered yet")
+            self._known_speaker_names = []
+        self._speakers_popup.setEnabled_(bool(known))
+        self._forget_btn.setEnabled_(bool(known))
+
+    def forgetSpeaker_(self, sender):
+        from overheard.speakers import SpeakerLibrary
+
+        index = self._speakers_popup.indexOfSelectedItem()
+        names = getattr(self, "_known_speaker_names", [])
+        if not (0 <= index < len(names)):
             return
-        _write_hf_token_to_zshrc(token)
-        cfg.set_value("hf_token", token)
-        os.environ["HF_TOKEN"] = token
-        self._token_status.setStringValue_("✓ Saved")
+        SpeakerLibrary().forget(names[index])
+        self._refresh_speakers()
 
     # ---- Dependencies ------------------------------------------------------
 
@@ -161,31 +206,44 @@ class _PreferencesDelegate(NSObject):
 
     def _do_download_models(self):
         try:
-            self._deps_status.setStringValue_("Downloading whisper large-v3...")
+            # Only fetch the model for the engine actually in use. Whisper
+            # large-v3 is a 3 GB download nobody on Parakeet needs.
+            engine = cfg.get("engine", "parakeet")
+            if engine == "whisper":
+                self._deps_status.setStringValue_("Downloading whisper large-v3...")
+                code = ("import whisperx; "
+                        "whisperx.load_model('large-v3', 'cpu', compute_type='int8')")
+                label = "Whisper"
+            else:
+                self._deps_status.setStringValue_("Downloading Parakeet TDT v3...")
+                from overheard.transcribe import PARAKEET_MODEL
+                code = ("from parakeet_mlx import from_pretrained; "
+                        f"from_pretrained({PARAKEET_MODEL!r})")
+                label = "Parakeet"
+
             result = subprocess.run(
-                ["python3", "-c",
-                 "import whisperx; whisperx.load_model('large-v3', 'cpu', compute_type='int8')"],
-                capture_output=True, text=True, timeout=600,
+                ["python3", "-c", code],
+                capture_output=True, text=True, timeout=1800,
             )
             if result.returncode != 0:
                 self._deps_status.setStringValue_(
-                    f"✗ Whisper failed: {result.stderr[:120]}"
+                    f"✗ {label} failed: {result.stderr[:120]}"
                 )
                 return
 
-            hf_token = os.environ.get("HF_TOKEN", "")
-            if hf_token:
-                self._deps_status.setStringValue_("Downloading pyannote diarization model...")
+            # Warm the diarization models too. The helper fetches them on first
+            # use with no credentials, so this only saves the wait later.
+            from overheard.helper import helper_path
+            binary = helper_path()
+            if binary is not None:
+                self._deps_status.setStringValue_("Downloading speaker models...")
                 result = subprocess.run(
-                    ["python3", "-c",
-                     "from pyannote.audio import Pipeline; "
-                     f"Pipeline.from_pretrained('pyannote/speaker-diarization-3.1',"
-                     f" use_auth_token='{hf_token}')"],
-                    capture_output=True, text=True, timeout=600,
+                    [str(binary), "download"],
+                    capture_output=True, text=True, timeout=1800,
                 )
                 if result.returncode != 0:
                     self._deps_status.setStringValue_(
-                        f"✓ Whisper done  ✗ Pyannote failed: {result.stderr[:80]}"
+                        f"✓ {label} done  ✗ Speaker models: {result.stderr[:80]}"
                     )
                     return
 
@@ -218,7 +276,7 @@ class _PreferencesDelegate(NSObject):
             cfg.set_value("output_dir", path)
             self._output_status.setStringValue_("✓ Saved")
 
-    # ---- Integrations — Obsidian -------------------------------------------
+    # ---- Integrations, Obsidian -------------------------------------------
 
     def toggleObsidian_(self, sender):
         enabled = bool(sender.state())
@@ -252,7 +310,7 @@ class _PreferencesDelegate(NSObject):
         val = self._local_speaker_field.stringValue().strip()
         cfg.set_value("local_speaker_name", val or "Don")
 
-    # ---- Integrations — Calendar -------------------------------------------
+    # ---- Integrations, Calendar -------------------------------------------
 
     def connectCalendar_(self, sender):
         """Trigger the macOS Calendar TCC permission prompt deliberately."""
@@ -273,36 +331,9 @@ class _PreferencesDelegate(NSObject):
                 err = (result.stderr or "Permission denied").strip()[:80]
                 self._calendar_status.setStringValue_(f"✗ {err}")
         except subprocess.TimeoutExpired:
-            self._calendar_status.setStringValue_("✗ Timed out — check System Settings → Privacy → Calendars")
+            self._calendar_status.setStringValue_("✗ Timed out. Check System Settings → Privacy → Calendars")
         except Exception as e:
             self._calendar_status.setStringValue_(f"✗ {e}")
-
-
-# ---------------------------------------------------------------------------
-# HF Token helpers
-# ---------------------------------------------------------------------------
-
-def _write_hf_token_to_zshrc(token: str) -> None:
-    """Write or update the HF_TOKEN export line in ~/.zshrc."""
-    zshrc = Path.home() / ".zshrc"
-    export_line = f'export HF_TOKEN="{token}"'
-    lines = []
-    replaced = False
-
-    if zshrc.exists():
-        with open(zshrc) as f:
-            lines = f.readlines()
-        for i, line in enumerate(lines):
-            if line.strip().startswith("export HF_TOKEN="):
-                lines[i] = export_line + "\n"
-                replaced = True
-                break
-
-    if not replaced:
-        lines.append(export_line + "\n")
-
-    with open(zshrc, "w") as f:
-        f.writelines(lines)
 
 
 def _device_exists(name: str) -> str:
@@ -366,10 +397,10 @@ class PreferencesWindow:
         BOTTOM = 20       # y baseline inside each pane
 
         # ================================================================== #
-        # Tab 1 — General
+        # Tab 1: General
         # ================================================================== #
         pane = _make_tab("General")
-        y = 240
+        y = 340
 
         pane.addSubview_(_make_label("Transcripts", 20, y, 300, 22, bold=True))
         y -= 36
@@ -388,10 +419,10 @@ class PreferencesWindow:
         pane.addSubview_(quit_btn)
 
         # ================================================================== #
-        # Tab 2 — Audio
+        # Tab 2: Audio
         # ================================================================== #
         pane = _make_tab("Audio")
-        y = 240
+        y = 340
 
         pane.addSubview_(_make_label("Recording Devices", 20, y, 300, 22, bold=True))
         y -= 36
@@ -419,37 +450,74 @@ class PreferencesWindow:
         ))
 
         # ================================================================== #
-        # Tab 2 — Transcription
+        # Tab 3: Transcription
         # ================================================================== #
         pane = _make_tab("Transcription")
-        y = 240
+        y = 340
+        from AppKit import NSPopUpButton, NSButton as _NSBtn
 
-        pane.addSubview_(_make_label("Hugging Face Token", 20, y, 300, 22, bold=True))
-        y -= 10
-        pane.addSubview_(_make_label(
-            "Required for speaker diarization (pyannote). Get one at huggingface.co.",
-            20, y, PW, 18,
-        ))
-        y -= 34
+        current_engine = cfg.get("engine", "parakeet")
+        if current_engine not in _ENGINES:
+            current_engine = "parakeet"
 
-        self._delegate._token_field = _make_text_field(
-            20, y, PW - 90, 24,
-            placeholder="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-            secure=True,
+        pane.addSubview_(_make_label("Engine", 20, y, 300, 22, bold=True))
+        y -= 32
+
+        engine_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(20, y, PW - 20, 26), False
         )
-        if os.environ.get("HF_TOKEN"):
-            self._delegate._token_field.setStringValue_(os.environ["HF_TOKEN"])
-        pane.addSubview_(self._delegate._token_field)
-        pane.addSubview_(_make_button("Save", PW - 64, y, 80, 24,
-                                     "saveToken:", self._delegate))
+        engine_popup.addItemsWithTitles_(_ENGINE_TITLES)
+        engine_popup.selectItemAtIndex_(_ENGINES.index(current_engine))
+        engine_popup.setTarget_(self._delegate)
+        engine_popup.setAction_("selectEngine:")
+        pane.addSubview_(engine_popup)
+        self._delegate._engine_popup = engine_popup
+        y -= 24
+
+        self._delegate._engine_status = _make_status(20, y, PW)
+        self._delegate._engine_status.setStringValue_(_ENGINE_BLURB[current_engine])
+        pane.addSubview_(self._delegate._engine_status)
         y -= 28
 
-        self._delegate._token_status = _make_status(20, y, PW)
-        self._delegate._token_status.setStringValue_(
-            "✓ Token is currently set" if os.environ.get("HF_TOKEN") else "No token set"
+        live_check = _NSBtn.alloc().initWithFrame_(NSMakeRect(20, y, PW, 20))
+        live_check.setButtonType_(3)   # NSButtonTypeSwitch
+        live_check.setTitle_("Show live transcript while recording")
+        live_check.setState_(1 if cfg.get("live_preview", True) else 0)
+        live_check.setTarget_(self._delegate)
+        live_check.setAction_("toggleLivePreview:")
+        live_check.setEnabled_(current_engine == "parakeet")
+        pane.addSubview_(live_check)
+        self._delegate._live_check = live_check
+        y -= 42
+
+        pane.addSubview_(_make_label("Speakers", 20, y, 300, 22, bold=True))
+        y -= 24
+        pane.addSubview_(_make_label(
+            "Runs on the Neural Engine. No account or token needed.",
+            20, y, PW, 18,
+        ))
+        y -= 26
+
+        remember_check = _NSBtn.alloc().initWithFrame_(NSMakeRect(20, y, PW, 20))
+        remember_check.setButtonType_(3)
+        remember_check.setTitle_("Recognise returning speakers by voice")
+        remember_check.setState_(1 if cfg.get("speaker_memory", True) else 0)
+        remember_check.setTarget_(self._delegate)
+        remember_check.setAction_("toggleSpeakerMemory:")
+        pane.addSubview_(remember_check)
+        y -= 30
+
+        speakers_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(20, y, PW - 110, 26), False
         )
-        pane.addSubview_(self._delegate._token_status)
-        y -= 50
+        pane.addSubview_(speakers_popup)
+        self._delegate._speakers_popup = speakers_popup
+        forget_btn = _make_button("Forget", PW - 84, y + 1, 100, 24,
+                                  "forgetSpeaker:", self._delegate)
+        pane.addSubview_(forget_btn)
+        self._delegate._forget_btn = forget_btn
+        self._delegate._refresh_speakers()
+        y -= 38
 
         pane.addSubview_(_make_label("AI Models", 20, y, 300, 22, bold=True))
         y -= 36
@@ -457,14 +525,14 @@ class PreferencesWindow:
         pane.addSubview_(_make_button("Download Models", 20, y, 160, 28,
                                      "downloadModels:", self._delegate))
         self._delegate._deps_status = _make_status(190, y + 5, PW - 170)
-        self._delegate._deps_status.setStringValue_("Whisper large-v3 + pyannote")
+        self._delegate._deps_status.setStringValue_("Downloads on first use")
         pane.addSubview_(self._delegate._deps_status)
 
         # ================================================================== #
-        # Tab 3 — Output
+        # Tab 4: Output
         # ================================================================== #
         pane = _make_tab("Output")
-        y = 240
+        y = 340
         from AppKit import NSButton as _NSButton
 
         pane.addSubview_(_make_label("Transcript Folder", 20, y, 300, 22, bold=True))
@@ -494,10 +562,10 @@ class PreferencesWindow:
         self._delegate._keep_recordings_btn = keep_btn
 
         # ================================================================== #
-        # Tab 4 — Integrations
+        # Tab 5: Integrations
         # ================================================================== #
         pane = _make_tab("Integrations")
-        y = 240
+        y = 340
         obsidian_enabled = bool(cfg.get("obsidian_enabled", False))
 
         pane.addSubview_(_make_label("Obsidian", 20, y, 300, 22, bold=True))
