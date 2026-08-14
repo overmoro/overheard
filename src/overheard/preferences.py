@@ -7,7 +7,6 @@ Sections: General, Audio, Transcription, Output, Integrations.
 import os
 import subprocess
 import threading
-from pathlib import Path
 
 import objc
 from AppKit import (

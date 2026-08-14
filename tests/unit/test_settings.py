@@ -54,8 +54,6 @@ class TestFixedBugs:
         the transcript said Don and the live panel said You, for the same voice
         in the same meeting.
         """
-        from overheard.live_panel import LiveTranscriptPanel  # noqa: F401
-
         assert settings.DEFAULTS["local_speaker_name"] == "Don"
         assert cfg.get("local_speaker_name") == "Don"
 

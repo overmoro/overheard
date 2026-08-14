@@ -10,7 +10,7 @@ Re-exporting them would create two names for one path, and patching the copy
 would silently fail to redirect the real reads. They live in ``settings``.
 """
 
-from overheard.settings import (  # noqa: F401  (re-exported on purpose)
+from overheard.settings import (
     DEFAULTS,
     Settings,
     get,
@@ -19,3 +19,5 @@ from overheard.settings import (  # noqa: F401  (re-exported on purpose)
     save,
     set_value,
 )
+
+__all__ = ["DEFAULTS", "Settings", "get", "load", "load_dict", "save", "set_value"]

@@ -160,6 +160,21 @@ class TestRender:
         assert "Speaker 1:" in out, "remote voices are renumbered from 1"
         assert out.index("Don:") < out.index("Speaker 1:")
 
+    def test_the_local_name_falls_back_to_the_one_declared_default(self, isolated_config):
+        """With nothing configured, the panel and the transcript must agree.
+
+        This panel used to default the local speaker to "You" while config.py
+        defaulted it to "Don", so the same voice in the same meeting was named
+        one thing live and another in the file that got saved.
+        """
+        from overheard import config as cfg
+
+        sentences = [{"start": 0.0, "end": 1.0, "text": "Morning."}]
+        out = self.render(FakeTranscriber(sentences, {0.0: 1.0}))
+
+        assert f"{cfg.get('local_speaker_name')}:" in out
+        assert "You:" not in out
+
     def test_remote_speakers_are_renumbered_from_one(self, isolated_config):
         """Sortformer indices are positional and may start anywhere, and a lone
         Speaker 3 with no Speaker 1 would only puzzle the reader."""
