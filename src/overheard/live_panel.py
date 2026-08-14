@@ -12,7 +12,6 @@ AppKit access stays on the main thread.
 
 import objc
 from AppKit import (
-    NSApplication,
     NSBackingStoreBuffered,
     NSColor,
     NSFont,

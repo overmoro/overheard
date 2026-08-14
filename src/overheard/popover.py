@@ -4,6 +4,7 @@ import math
 
 import objc
 from AppKit import (
+    NSApplication,
     NSBackingStoreBuffered,
     NSButton,
     NSColor,
@@ -331,7 +332,7 @@ class _PopoverDelegate(NSObject):
         return self
 
     def togglePanel_(self, sender):
-        from AppKit import NSApplication, NSEventTypeRightMouseDown
+        from AppKit import NSEventTypeRightMouseDown
         event = NSApplication.sharedApplication().currentEvent()
         if event is not None and event.type() == NSEventTypeRightMouseDown:
             self._show_context_menu(sender)
