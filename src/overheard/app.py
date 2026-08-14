@@ -508,6 +508,32 @@ class TranscriberApp(rumps.App):
             )
 
 
+def _ensure_utf8() -> None:
+    """Make text files decode as UTF-8 however the app was launched.
+
+    A bundle started from Finder inherits no LANG, so Python's preferred
+    encoding falls back to ASCII, and every dependency that opens a text file
+    without naming an encoding inherits that. parakeet_mlx reads the model's
+    config.json with a bare open(); the file has non-ASCII bytes, so loading
+    the model raised UnicodeDecodeError, and parakeet_mlx's own fallback then
+    reported the failure as a missing model. The model was there all along.
+
+    LSEnvironment in the bundle's plist sets PYTHONUTF8 for the Finder launch,
+    which is the real fix because it applies before the interpreter starts.
+    This is the second layer, for the paths LaunchServices does not cover, such
+    as running the binary straight from a shell that has no LANG.
+    """
+    import locale
+
+    if sys.flags.utf8_mode:
+        return
+    try:
+        if "utf-8" not in locale.getpreferredencoding(False).lower():
+            locale.setlocale(locale.LC_CTYPE, "UTF-8")
+    except (locale.Error, ValueError) as e:
+        print(f"could not force a UTF-8 locale: {e}", file=sys.stderr)
+
+
 def _ensure_homebrew_path() -> None:
     """Add Homebrew bin to PATH if not already present.
 
@@ -606,6 +632,7 @@ def _enable_crash_diagnostics() -> None:
 
 def main():
     _enable_crash_diagnostics()
+    _ensure_utf8()
     _ensure_homebrew_path()
     _output_dir().mkdir(parents=True, exist_ok=True)
 

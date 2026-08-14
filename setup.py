@@ -35,6 +35,15 @@ OPTIONS = {
         ),
         # Notification style
         "NSUserNotificationAlertStyle": "alert",
+        # Launched from Finder there is no LANG, so Python falls back to ASCII
+        # and any dependency opening a UTF-8 file without saying so fails.
+        # parakeet_mlx reads the model's config.json with a bare open(), so the
+        # model failed to load with a UnicodeDecodeError that its own fallback
+        # then reported as "model not found".
+        "LSEnvironment": {
+            "PYTHONUTF8": "1",
+            "LC_CTYPE": "UTF-8",
+        },
     },
     "packages": [
         "overheard",
