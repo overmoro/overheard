@@ -25,6 +25,12 @@ DEFAULTS = {
     # Diarizer: "auto" (FluidAudio, falling back to pyannote), "fluidaudio",
     # or "pyannote". pyannote needs HF_TOKEN and the optional extra installed.
     "diarizer": "auto",
+    # Remember voices between meetings so returning speakers are recognised
+    # without relying on the attendee list order.
+    "speaker_memory": True,
+    # Cosine similarity required to treat a voice as a known person. Raise it
+    # if wrong names appear; lower it if returning speakers go unrecognised.
+    "speaker_match_threshold": 0.70,
 }
 
 

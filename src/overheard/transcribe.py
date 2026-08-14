@@ -40,6 +40,7 @@ def _build_speaker_map(
     remote_labels: list[str],
     attendees: list[str],
     mic_speaker: str | None = None,
+    known: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Map diarized labels to real names, using which track each came from.
 
@@ -48,15 +49,20 @@ def _build_speaker_map(
     knowledge rather than inference, so the first mic speaker is the person at
     this machine and gets ``mic_speaker`` outright.
 
-    Everyone else is filled from the attendee list in first-speech order, which
-    is a convention rather than a fact, but a deterministic and explainable one.
-    Additional mic speakers occur when several people share the laptop in an
-    in-person meeting.
-    """
-    mapping: dict[str, str] = {}
-    remaining = [a for a in attendees if a]
+    ``known`` holds labels already identified by voice against the speaker
+    library. Those win outright: a matched embedding is evidence, where the rest
+    of this function is convention.
 
-    if local_labels and mic_speaker:
+    Everyone else is filled from the attendee list in first-speech order, which
+    is deterministic and explainable, but still a guess. Additional mic speakers
+    occur when several people share the laptop in an in-person meeting.
+    """
+    known: dict[str, str] = dict(known or {})
+    mapping: dict[str, str] = dict(known)
+    claimed = {name.strip().casefold() for name in known.values()}
+    remaining = [a for a in attendees if a and a.strip().casefold() not in claimed]
+
+    if local_labels and mic_speaker and local_labels[0] not in mapping:
         mapping[local_labels[0]] = mic_speaker
         # Don't hand the local speaker's name out twice if they're also listed
         remaining = [
@@ -373,7 +379,8 @@ def _transcribe_whisper(
 
 
 def _diarize(
-    audio_path: str, status_callback=None, max_speakers: int | None = None
+    audio_path: str, status_callback=None, max_speakers: int | None = None,
+    with_embeddings: bool = False,
 ) -> list[dict]:
     """Run speaker diarization, returning {start, end, speaker} turns.
 
@@ -389,7 +396,8 @@ def _diarize(
 
     if backend in ("auto", "fluidaudio"):
         turns = _diarize_fluidaudio(
-            audio_path, status_callback=status_callback, max_speakers=max_speakers
+            audio_path, status_callback=status_callback, max_speakers=max_speakers,
+            with_embeddings=with_embeddings,
         )
         if turns is not None:
             return turns
@@ -402,7 +410,8 @@ def _diarize(
 
 
 def _diarize_fluidaudio(
-    audio_path: str, status_callback=None, max_speakers: int | None = None
+    audio_path: str, status_callback=None, max_speakers: int | None = None,
+    with_embeddings: bool = False,
 ) -> list[dict] | None:
     """Diarize through overheard-helper. Returns None if it could not run.
 
@@ -426,6 +435,9 @@ def _diarize_fluidaudio(
         # An upper bound rather than an exact count: the attendee list says who
         # was invited, not how many of them actually spoke.
         argv += ["--max-speakers", str(int(max_speakers))]
+    if with_embeddings:
+        # 256 floats per segment, so only requested when identity matching is on
+        argv.append("--embeddings")
 
     try:
         result = subprocess.run(argv, capture_output=True, timeout=1800)
@@ -445,15 +457,19 @@ def _diarize_fluidaudio(
         print(f"[overheard] could not parse diarize output: {e}", file=sys.stderr)
         return None
 
-    return [
-        {
+    turns = []
+    for segment in payload.get("segments", []):
+        if segment.get("end", 0) <= segment.get("start", 0):
+            continue
+        turn = {
             "start": float(segment["start"]),
             "end": float(segment["end"]),
             "speaker": segment["speaker"],
         }
-        for segment in payload.get("segments", [])
-        if segment.get("end", 0) > segment.get("start", 0)
-    ]
+        if with_embeddings and segment.get("embedding"):
+            turn["embedding"] = segment["embedding"]
+        turns.append(turn)
+    return turns
 
 
 def _diarize_pyannote(audio_path: str, status_callback=None) -> list[dict]:
@@ -628,6 +644,8 @@ def transcribe_audio(
     prefixes = {"mic": "MIC", "system": "SYS", "mixed": "SPEAKER"}
     results: dict[str, dict] = {}
 
+    remember_speakers = bool(cfg.get("speaker_memory", True))
+
     # The attendee list bounds how many distinct voices to expect. It's an
     # upper bound, not a count: being invited isn't the same as speaking.
     attendee_count = (
@@ -659,11 +677,13 @@ def transcribe_audio(
                 track["path"],
                 status_callback=status_callback,
                 max_speakers=attendee_count or None,
+                with_embeddings=remember_speakers,
             )
             turns, order = _canonicalize_turns(turns, prefix=prefixes[label])
             results[label] = {
                 "segments": _assign_speakers(segments, turns),
                 "order": order,
+                "turns": turns,
             }
     finally:
         for track in tracks:
@@ -694,8 +714,28 @@ def transcribe_audio(
         remote_labels = system["order"]
 
     attendees = list(meeting_details.attendees) if meeting_details is not None else []
+
+    all_turns = [t for r in results.values() for t in r.get("turns", [])]
+    label_embeddings = {}
+    library = None
+    known: dict[str, str] = {}
+    if remember_speakers and all_turns:
+        from overheard.speakers import SpeakerLibrary, mean_embeddings
+
+        label_embeddings = mean_embeddings(all_turns)
+        if label_embeddings:
+            library = SpeakerLibrary()
+            known = library.match_labels(
+                label_embeddings,
+                threshold=float(cfg.get("speaker_match_threshold", 0.70)),
+            )
+            if known:
+                print(f"[overheard] recognised by voice: {sorted(known.values())}",
+                      file=sys.stderr)
+
     speaker_map = _build_speaker_map(
-        local_labels, remote_labels, attendees, mic_speaker=mic_speaker
+        local_labels, remote_labels, attendees,
+        mic_speaker=mic_speaker, known=known,
     )
 
     _write_markdown(
@@ -704,6 +744,16 @@ def transcribe_audio(
         meeting_details=meeting_details,
         speaker_map=speaker_map,
     )
+
+    # Learn the voices that ended up with real names, so the next meeting can
+    # recognise them without an attendee list.
+    if library is not None and label_embeddings:
+        for label, name in speaker_map.items():
+            embedding = label_embeddings.get(label)
+            if embedding and name:
+                library.remember(name, embedding)
+        library.save()
+
     return output_path
 
 

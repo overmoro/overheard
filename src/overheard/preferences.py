@@ -165,6 +165,39 @@ class _PreferencesDelegate(NSObject):
     def toggleLivePreview_(self, sender):
         cfg.set_value("live_preview", bool(sender.state()))
 
+    # ---- Speakers ----------------------------------------------------------
+
+    def toggleSpeakerMemory_(self, sender):
+        cfg.set_value("speaker_memory", bool(sender.state()))
+
+    def _refresh_speakers(self):
+        """Reload the known-voices popup from the library on disk."""
+        from overheard.speakers import SpeakerLibrary
+
+        known = SpeakerLibrary().describe()
+        self._speakers_popup.removeAllItems()
+        if known:
+            self._speakers_popup.addItemsWithTitles_(
+                [f"{name}  ({samples} recording{'s' if samples != 1 else ''})"
+                 for name, samples, _ in known]
+            )
+            self._known_speaker_names = [name for name, _, _ in known]
+        else:
+            self._speakers_popup.addItemWithTitle_("No voices remembered yet")
+            self._known_speaker_names = []
+        self._speakers_popup.setEnabled_(bool(known))
+        self._forget_btn.setEnabled_(bool(known))
+
+    def forgetSpeaker_(self, sender):
+        from overheard.speakers import SpeakerLibrary
+
+        index = self._speakers_popup.indexOfSelectedItem()
+        names = getattr(self, "_known_speaker_names", [])
+        if not (0 <= index < len(names)):
+            return
+        SpeakerLibrary().forget(names[index])
+        self._refresh_speakers()
+
     # ---- Dependencies ------------------------------------------------------
 
     def downloadModels_(self, sender):
@@ -458,12 +491,33 @@ class PreferencesWindow:
         y -= 42
 
         pane.addSubview_(_make_label("Speakers", 20, y, 300, 22, bold=True))
-        y -= 26
+        y -= 24
         pane.addSubview_(_make_label(
-            "Speaker labelling runs on the Neural Engine. No account or token needed.",
+            "Runs on the Neural Engine. No account or token needed.",
             20, y, PW, 18,
         ))
-        y -= 44
+        y -= 26
+
+        remember_check = _NSBtn.alloc().initWithFrame_(NSMakeRect(20, y, PW, 20))
+        remember_check.setButtonType_(3)
+        remember_check.setTitle_("Recognise returning speakers by voice")
+        remember_check.setState_(1 if cfg.get("speaker_memory", True) else 0)
+        remember_check.setTarget_(self._delegate)
+        remember_check.setAction_("toggleSpeakerMemory:")
+        pane.addSubview_(remember_check)
+        y -= 30
+
+        speakers_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(20, y, PW - 110, 26), False
+        )
+        pane.addSubview_(speakers_popup)
+        self._delegate._speakers_popup = speakers_popup
+        forget_btn = _make_button("Forget", PW - 84, y + 1, 100, 24,
+                                  "forgetSpeaker:", self._delegate)
+        pane.addSubview_(forget_btn)
+        self._delegate._forget_btn = forget_btn
+        self._delegate._refresh_speakers()
+        y -= 38
 
         pane.addSubview_(_make_label("AI Models", 20, y, 300, 22, bold=True))
         y -= 36
