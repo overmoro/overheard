@@ -16,6 +16,12 @@ DEFAULTS = {
     "obsidian_vault": "",
     "obsidian_inbox": "01_Inbox",
     "local_speaker_name": "Don",
+    # Transcription engine: "parakeet" (MLX, GPU) or "whisper" (WhisperX, CPU)
+    "engine": "parakeet",
+    # Show a running transcript while recording (parakeet engine only)
+    "live_preview": True,
+    # Capture backend: "auto" (tap when available), "tap", or "device"
+    "capture_backend": "auto",
 }
 
 

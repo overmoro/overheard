@@ -32,7 +32,18 @@ from overheard.audio import create_aggregate_device, create_multi_output_device
 
 # Window dimensions
 WIN_W = 500
-WIN_H = 360   # tabs keep each pane compact
+WIN_H = 460   # tall enough for the Transcription pane's engine picker
+
+# Engine choice, in popup-menu order
+_ENGINES = ["parakeet", "whisper"]
+_ENGINE_TITLES = [
+    "Parakeet TDT 0.6B v3 (fast, on GPU)",
+    "Whisper large-v3 (slower, on CPU)",
+]
+_ENGINE_BLURB = {
+    "parakeet": "Runs on the Apple Silicon GPU. Supports live transcription.",
+    "whisper": "Runs on CPU, far slower, but handles 99 languages.",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +109,7 @@ def _make_text_field(x: float, y: float, w: float, h: float,
 
 
 # ---------------------------------------------------------------------------
-# Delegate — NSObject subclass handles all button actions
+# Delegate: NSObject subclass handles all button actions
 # ---------------------------------------------------------------------------
 
 class _PreferencesDelegate(NSObject):
@@ -153,6 +164,19 @@ class _PreferencesDelegate(NSObject):
         os.environ["HF_TOKEN"] = token
         self._token_status.setStringValue_("✓ Saved")
 
+    # ---- Engine ------------------------------------------------------------
+
+    def selectEngine_(self, sender):
+        """Radio-style engine selection driven by the popup button."""
+        engine = "whisper" if sender.indexOfSelectedItem() == 1 else "parakeet"
+        cfg.set_value("engine", engine)
+        self._engine_status.setStringValue_(_ENGINE_BLURB[engine])
+        # Live preview is streamed by Parakeet, so it's meaningless on Whisper
+        self._live_check.setEnabled_(engine == "parakeet")
+
+    def toggleLivePreview_(self, sender):
+        cfg.set_value("live_preview", bool(sender.state()))
+
     # ---- Dependencies ------------------------------------------------------
 
     def downloadModels_(self, sender):
@@ -161,15 +185,28 @@ class _PreferencesDelegate(NSObject):
 
     def _do_download_models(self):
         try:
-            self._deps_status.setStringValue_("Downloading whisper large-v3...")
+            # Only fetch the model for the engine actually in use. Whisper
+            # large-v3 is a 3 GB download nobody on Parakeet needs.
+            engine = cfg.get("engine", "parakeet")
+            if engine == "whisper":
+                self._deps_status.setStringValue_("Downloading whisper large-v3...")
+                code = ("import whisperx; "
+                        "whisperx.load_model('large-v3', 'cpu', compute_type='int8')")
+                label = "Whisper"
+            else:
+                self._deps_status.setStringValue_("Downloading Parakeet TDT v3...")
+                from overheard.transcribe import PARAKEET_MODEL
+                code = ("from parakeet_mlx import from_pretrained; "
+                        f"from_pretrained({PARAKEET_MODEL!r})")
+                label = "Parakeet"
+
             result = subprocess.run(
-                ["python3", "-c",
-                 "import whisperx; whisperx.load_model('large-v3', 'cpu', compute_type='int8')"],
-                capture_output=True, text=True, timeout=600,
+                ["python3", "-c", code],
+                capture_output=True, text=True, timeout=1800,
             )
             if result.returncode != 0:
                 self._deps_status.setStringValue_(
-                    f"✗ Whisper failed: {result.stderr[:120]}"
+                    f"✗ {label} failed: {result.stderr[:120]}"
                 )
                 return
 
@@ -185,7 +222,7 @@ class _PreferencesDelegate(NSObject):
                 )
                 if result.returncode != 0:
                     self._deps_status.setStringValue_(
-                        f"✓ Whisper done  ✗ Pyannote failed: {result.stderr[:80]}"
+                        f"✓ {label} done  ✗ Pyannote failed: {result.stderr[:80]}"
                     )
                     return
 
@@ -218,7 +255,7 @@ class _PreferencesDelegate(NSObject):
             cfg.set_value("output_dir", path)
             self._output_status.setStringValue_("✓ Saved")
 
-    # ---- Integrations — Obsidian -------------------------------------------
+    # ---- Integrations, Obsidian -------------------------------------------
 
     def toggleObsidian_(self, sender):
         enabled = bool(sender.state())
@@ -252,7 +289,7 @@ class _PreferencesDelegate(NSObject):
         val = self._local_speaker_field.stringValue().strip()
         cfg.set_value("local_speaker_name", val or "Don")
 
-    # ---- Integrations — Calendar -------------------------------------------
+    # ---- Integrations, Calendar -------------------------------------------
 
     def connectCalendar_(self, sender):
         """Trigger the macOS Calendar TCC permission prompt deliberately."""
@@ -273,7 +310,7 @@ class _PreferencesDelegate(NSObject):
                 err = (result.stderr or "Permission denied").strip()[:80]
                 self._calendar_status.setStringValue_(f"✗ {err}")
         except subprocess.TimeoutExpired:
-            self._calendar_status.setStringValue_("✗ Timed out — check System Settings → Privacy → Calendars")
+            self._calendar_status.setStringValue_("✗ Timed out. Check System Settings → Privacy → Calendars")
         except Exception as e:
             self._calendar_status.setStringValue_(f"✗ {e}")
 
@@ -366,10 +403,10 @@ class PreferencesWindow:
         BOTTOM = 20       # y baseline inside each pane
 
         # ================================================================== #
-        # Tab 1 — General
+        # Tab 1: General
         # ================================================================== #
         pane = _make_tab("General")
-        y = 240
+        y = 340
 
         pane.addSubview_(_make_label("Transcripts", 20, y, 300, 22, bold=True))
         y -= 36
@@ -388,10 +425,10 @@ class PreferencesWindow:
         pane.addSubview_(quit_btn)
 
         # ================================================================== #
-        # Tab 2 — Audio
+        # Tab 2: Audio
         # ================================================================== #
         pane = _make_tab("Audio")
-        y = 240
+        y = 340
 
         pane.addSubview_(_make_label("Recording Devices", 20, y, 300, 22, bold=True))
         y -= 36
@@ -419,10 +456,45 @@ class PreferencesWindow:
         ))
 
         # ================================================================== #
-        # Tab 2 — Transcription
+        # Tab 3: Transcription
         # ================================================================== #
         pane = _make_tab("Transcription")
-        y = 240
+        y = 340
+        from AppKit import NSPopUpButton, NSButton as _NSBtn
+
+        current_engine = cfg.get("engine", "parakeet")
+        if current_engine not in _ENGINES:
+            current_engine = "parakeet"
+
+        pane.addSubview_(_make_label("Engine", 20, y, 300, 22, bold=True))
+        y -= 32
+
+        engine_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(20, y, PW - 20, 26), False
+        )
+        engine_popup.addItemsWithTitles_(_ENGINE_TITLES)
+        engine_popup.selectItemAtIndex_(_ENGINES.index(current_engine))
+        engine_popup.setTarget_(self._delegate)
+        engine_popup.setAction_("selectEngine:")
+        pane.addSubview_(engine_popup)
+        self._delegate._engine_popup = engine_popup
+        y -= 24
+
+        self._delegate._engine_status = _make_status(20, y, PW)
+        self._delegate._engine_status.setStringValue_(_ENGINE_BLURB[current_engine])
+        pane.addSubview_(self._delegate._engine_status)
+        y -= 28
+
+        live_check = _NSBtn.alloc().initWithFrame_(NSMakeRect(20, y, PW, 20))
+        live_check.setButtonType_(3)   # NSButtonTypeSwitch
+        live_check.setTitle_("Show live transcript while recording")
+        live_check.setState_(1 if cfg.get("live_preview", True) else 0)
+        live_check.setTarget_(self._delegate)
+        live_check.setAction_("toggleLivePreview:")
+        live_check.setEnabled_(current_engine == "parakeet")
+        pane.addSubview_(live_check)
+        self._delegate._live_check = live_check
+        y -= 42
 
         pane.addSubview_(_make_label("Hugging Face Token", 20, y, 300, 22, bold=True))
         y -= 10
@@ -461,10 +533,10 @@ class PreferencesWindow:
         pane.addSubview_(self._delegate._deps_status)
 
         # ================================================================== #
-        # Tab 3 — Output
+        # Tab 4: Output
         # ================================================================== #
         pane = _make_tab("Output")
-        y = 240
+        y = 340
         from AppKit import NSButton as _NSButton
 
         pane.addSubview_(_make_label("Transcript Folder", 20, y, 300, 22, bold=True))
@@ -494,10 +566,10 @@ class PreferencesWindow:
         self._delegate._keep_recordings_btn = keep_btn
 
         # ================================================================== #
-        # Tab 4 — Integrations
+        # Tab 5: Integrations
         # ================================================================== #
         pane = _make_tab("Integrations")
-        y = 240
+        y = 340
         obsidian_enabled = bool(cfg.get("obsidian_enabled", False))
 
         pane.addSubview_(_make_label("Obsidian", 20, y, 300, 22, bold=True))
