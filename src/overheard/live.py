@@ -20,8 +20,22 @@ import queue
 import subprocess
 import sys
 import threading
+from fractions import Fraction
 
 import numpy as np
+
+# Imported eagerly, and this is load-bearing rather than tidiness.
+#
+# _resample used to import scipy.signal on first use, and its only caller is
+# feed(), which runs on the capture thread inside the audio tap. That import
+# pulls in array_api_compat, which runs `from numpy import *`, which drags in
+# numpy.f2py: hundreds of milliseconds holding the GIL, on the one thread that
+# must never stall. Core Audio's watchdog saw the audio path stop and killed
+# the process with SIGTRAP, so pressing Record made the whole app vanish.
+#
+# Paying for it here means it happens on the main thread, when live.py is first
+# imported, before any audio is flowing.
+from scipy.signal import resample_poly
 
 # Parakeet's encoder expects 16 kHz mono
 TARGET_RATE = 16000
@@ -82,8 +96,6 @@ def _resample(audio: np.ndarray, src_rate: int) -> np.ndarray:
     """
     if src_rate == TARGET_RATE:
         return audio
-    from fractions import Fraction
-    from scipy.signal import resample_poly
 
     ratio = Fraction(TARGET_RATE, int(src_rate)).limit_denominator(1000)
     return resample_poly(audio, ratio.numerator, ratio.denominator).astype(np.float32)
