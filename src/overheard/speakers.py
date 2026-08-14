@@ -1,12 +1,17 @@
-"""Speaker identity that persists across meetings.
+"""Who the voices belong to, within a meeting and across them.
+
+Two related jobs, kept together because they are two ends of one decision.
+``build_speaker_map`` decides what name a diarized label gets, weighing three
+signals: a voice matched against the library (evidence), which track carried the
+audio (measurement), and the attendee list order (convention). The library below
+is where the first of those comes from.
 
 The diarizer returns a voice embedding per segment. Storing those against
 confirmed names lets the next meeting recognise a returning voice directly,
 rather than guessing from the order people happened to speak in.
 
-This is the last inference in the naming path. Attendee-order matching is a
-convention: defensible, deterministic, and still a guess. A matched embedding is
-evidence.
+Attendee-order matching is a convention: defensible, deterministic, and still a
+guess. A matched embedding is evidence.
 
 Library lives at ~/.config/overheard/speakers.json:
 
@@ -26,6 +31,62 @@ LIBRARY_PATH = cfg.CONFIG_DIR / "speakers.json"
 # Deliberately cautious: a wrong name on a transcript is worse than a missing
 # one, since the reader has no way to tell it is wrong.
 DEFAULT_THRESHOLD = 0.70
+
+
+def build_speaker_map(
+    local_labels: list[str],
+    remote_labels: list[str],
+    attendees: list[str],
+    mic_speaker: str | None = None,
+    known: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Map diarized labels to real names, using which track each came from.
+
+    Labels arrive already split by source: ``local_labels`` were heard on the
+    microphone and ``remote_labels`` through the system audio. That split is
+    knowledge rather than inference, so the first mic speaker is the person at
+    this machine and gets ``mic_speaker`` outright.
+
+    ``known`` holds labels already identified by voice against the speaker
+    library. Those win outright: a matched embedding is evidence, where the rest
+    of this function is convention.
+
+    Everyone else is filled from the attendee list in first-speech order, which
+    is deterministic and explainable, but still a guess. Additional mic speakers
+    occur when several people share the laptop in an in-person meeting.
+    """
+    known: dict[str, str] = dict(known or {})
+    mapping: dict[str, str] = dict(known)
+    claimed = {name.strip().casefold() for name in known.values()}
+    # Guard against whitespace-only entries: the details panel has free-text
+    # attendee fields, and a name of "  " would render as a broken [[ ]] link.
+    remaining = [a for a in attendees
+                 if a.strip() and a.strip().casefold() not in claimed]
+
+    # Also guard against handing out a name the library already claimed for a
+    # different voice, which would show one person as two speakers.
+    if (
+        local_labels
+        and mic_speaker
+        and local_labels[0] not in mapping
+        and mic_speaker.strip().casefold() not in claimed
+    ):
+        mapping[local_labels[0]] = mic_speaker
+        # Don't hand the local speaker's name out twice if they're also listed
+        remaining = [
+            a for a in remaining
+            if a.strip().casefold() != mic_speaker.strip().casefold()
+        ]
+
+    # Remote speakers first: they are the ones the attendee list describes.
+    for label in remote_labels + local_labels:
+        if label in mapping:
+            continue
+        if not remaining:
+            break
+        mapping[label] = remaining.pop(0)
+
+    return mapping
 
 
 def _cosine(a, b) -> float:

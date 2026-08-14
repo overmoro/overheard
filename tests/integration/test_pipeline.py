@@ -62,7 +62,7 @@ def speaker_lines(markdown_path):
 
 def test_dual_track_transcript_names_both_speakers(dual_speech_wav, tmp_path, isolated_config):
     from overheard.details_panel import MeetingDetails
-    from overheard.transcribe import transcribe_audio
+    from overheard.pipeline import transcribe_audio
 
     details = MeetingDetails(
         name="Budget Sync", source="zoom", location="Zoom",
@@ -100,7 +100,7 @@ def test_speaker_is_recognised_in_a_later_meeting(dual_speech_wav, tmp_path, iso
     """
     from overheard.details_panel import MeetingDetails
     from overheard.speakers import SpeakerLibrary
-    from overheard.transcribe import transcribe_audio
+    from overheard.pipeline import transcribe_audio
 
     first = MeetingDetails(
         name="First", source="zoom", location="Zoom",
@@ -130,7 +130,7 @@ def test_speaker_is_recognised_in_a_later_meeting(dual_speech_wav, tmp_path, iso
 def test_mono_recording_still_produces_a_transcript(dual_speech_wav, tmp_path, isolated_config):
     """No channel layout: one folded track, speakers separated by clustering."""
     from overheard.details_panel import MeetingDetails
-    from overheard.transcribe import transcribe_audio
+    from overheard.pipeline import transcribe_audio
 
     data, rate = sf.read(dual_speech_wav, dtype="float32")
     mono_path = tmp_path / "mono.wav"

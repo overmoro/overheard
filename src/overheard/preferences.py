@@ -216,7 +216,7 @@ class _PreferencesDelegate(NSObject):
                 label = "Whisper"
             else:
                 self._deps_status.setStringValue_("Downloading Parakeet TDT v3...")
-                from overheard.transcribe import PARAKEET_MODEL
+                from overheard.asr import PARAKEET_MODEL
                 code = ("from parakeet_mlx import from_pretrained; "
                         f"from_pretrained({PARAKEET_MODEL!r})")
                 label = "Parakeet"

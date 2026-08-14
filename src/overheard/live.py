@@ -52,7 +52,7 @@ def is_available() -> bool:
 def _to_mono(block: np.ndarray, channels_info: dict | None = None) -> np.ndarray:
     """Collapse a (frames, channels) block to mono float32.
 
-    Mirrors the offline downmix in transcribe._prepare_mono_audio: when the
+    Mirrors the offline downmix in tracks.prepare_mono_audio: when the
     layout is known, the mic is mixed at equal weight against the combined
     system audio so the local speaker is not buried under the remote side.
     """
@@ -228,7 +228,7 @@ class LiveTranscriber:
 
     def __init__(self, sample_rate: int, channels_info: dict | None = None,
                  model_name: str | None = None):
-        from overheard.transcribe import PARAKEET_MODEL
+        from overheard.asr import PARAKEET_MODEL
 
         self.sample_rate = int(sample_rate)
         self.channels_info = channels_info

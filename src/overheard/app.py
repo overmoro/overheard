@@ -13,7 +13,7 @@ import rumps
 from overheard import config as cfg
 from overheard.audio import Recorder, find_recording_device, DEFAULT_DEVICE_NAME, SAMPLE_RATE
 from overheard.protocols import AudioSource
-from overheard.transcribe import transcribe_audio
+from overheard.pipeline import transcribe_audio
 
 
 
