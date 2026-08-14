@@ -154,6 +154,26 @@ class _PreferencesDelegate(NSObject):
 
     # ---- Engine ------------------------------------------------------------
 
+    def refresh_status(self) -> None:
+        """Recompute every label describing state outside this window.
+
+        Called on open and after anything that changes what they report, so the
+        window never shows a reading taken earlier in the session.
+        """
+        status = getattr(self, "_deps_status", None)
+        if status is not None:
+            status.setStringValue_(_model_status())
+
+        capture = getattr(self, "_capture_status", None)
+        if capture is not None:
+            from overheard.capture import is_available as _tap_available
+            ok, why = _tap_available()
+            capture.setStringValue_(
+                "Capturing through Core Audio process taps. No extra devices needed."
+                if ok else
+                f"Process taps unavailable ({why}). The fallback below needs BlackHole."
+            )
+
     def selectEngine_(self, sender):
         """Radio-style engine selection driven by the popup button."""
         engine = "whisper" if sender.indexOfSelectedItem() == 1 else "parakeet"
@@ -161,6 +181,9 @@ class _PreferencesDelegate(NSObject):
         self._engine_status.setStringValue_(_ENGINE_BLURB[engine])
         # Live preview is streamed by Parakeet, so it's meaningless on Whisper
         self._live_check.setEnabled_(engine == "parakeet")
+        # Model status is per engine: Parakeet being installed says nothing
+        # about whether the 3 GB Whisper repo is.
+        self.refresh_status()
 
     def toggleLivePreview_(self, sender):
         cfg.set_value("live_preview", bool(sender.state()))
@@ -247,7 +270,7 @@ class _PreferencesDelegate(NSObject):
                     )
                     return
 
-            self._deps_status.setStringValue_("✓ All models downloaded")
+            self.refresh_status()
         except subprocess.TimeoutExpired:
             self._deps_status.setStringValue_("✗ Download timed out")
         except Exception as e:
@@ -386,11 +409,19 @@ class PreferencesWindow:
 
     def __init__(self):
         self._window: Any = None
-        self._delegate = None
+        # A PyObjC delegate, genuinely untyped; built by _build below.
+        self._delegate: Any = None
 
     def show(self) -> None:
+        """Open the window, refreshing anything that can go stale while closed.
+
+        The window is built once and reused, so status computed during _build
+        would be a reading from the first time Preferences was ever opened.
+        Models get downloaded and engines get switched long after that.
+        """
         if self._window is None:
             self._build()
+        self._delegate.refresh_status()
         self._window.makeKeyAndOrderFront_(None)
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
 
@@ -454,12 +485,13 @@ class PreferencesWindow:
 
         from overheard.capture import is_available as _tap_available
         _tap_ok, _tap_why = _tap_available()
-        pane.addSubview_(_make_label(
+        self._delegate._capture_status = _make_label(
             "Capturing through Core Audio process taps. No extra devices needed."
             if _tap_ok else
             f"Process taps unavailable ({_tap_why}). The fallback below needs BlackHole.",
             20, y, PW, 16,
-        ))
+        )
+        pane.addSubview_(self._delegate._capture_status)
         y -= 30
 
         btn_agg = _make_button("Create Recording Device", 20, y, 210, 28,

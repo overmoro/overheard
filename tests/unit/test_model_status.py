@@ -18,11 +18,17 @@ def hf_cache(tmp_path, monkeypatch):
     return tmp_path / "hub"
 
 
-def _install(hub, repo_id, *, with_files=True):
+def _install(hub, repo_id, *, weights=True):
+    """Lay out a cache entry the way huggingface_hub does.
+
+    Completed files appear under snapshots/<rev>/ as they finish, and they
+    finish smallest first, so config.json lands long before the weights.
+    """
     snapshot = hub / ("models--" + repo_id.replace("/", "--")) / "snapshots" / "abc123"
     snapshot.mkdir(parents=True)
-    if with_files:
-        (snapshot / "config.json").write_text("{}")
+    (snapshot / "config.json").write_text("{}")
+    if weights:
+        (snapshot / "model.safetensors").write_bytes(b"\x00" * 32)
     return snapshot
 
 
@@ -35,12 +41,15 @@ class TestIsModelCached:
         assert asr.is_model_cached("mlx-community/parakeet-tdt-0.6b-v3") is True
 
     def test_an_interrupted_download_reports_missing(self, hf_cache):
-        """A cancelled download leaves the directories but no weights.
+        """The real shape of a cancelled download: config.json, no weights.
 
-        Treating the folder's existence as proof is how a status check starts
-        lying again, one layer down from the label it replaced.
+        huggingface_hub writes completed files smallest first, so a download
+        stopped after seconds leaves a good config and none of the model.
+        Counting any file as proof would put the lie one layer below the label
+        this check replaced, and the user would only find out when a meeting
+        failed to transcribe.
         """
-        _install(hf_cache, "mlx-community/parakeet-tdt-0.6b-v3", with_files=False)
+        _install(hf_cache, "mlx-community/parakeet-tdt-0.6b-v3", weights=False)
         assert asr.is_model_cached("mlx-community/parakeet-tdt-0.6b-v3") is False
 
     def test_another_model_being_present_does_not_count(self, hf_cache):

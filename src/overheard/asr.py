@@ -41,8 +41,14 @@ def is_model_cached(repo_id: str = PARAKEET_MODEL) -> bool:
     way to tell it apart from a real answer.
 
     The cache layout is Hugging Face's own: ``<cache>/hub/models--org--name``
-    with the real files under ``snapshots/<revision>/``. A bare directory is
-    not enough, since an interrupted download leaves one behind.
+    with the real files under ``snapshots/<revision>/``.
+
+    Presence of the weights is what is checked, not presence of any file.
+    huggingface_hub materialises completed files smallest first, so a download
+    cancelled after a few seconds leaves a perfectly good config.json and no
+    weights at all. Counting that as installed would put the lie one layer
+    below the label this replaced, and the user would only find out when a
+    meeting failed to transcribe.
     """
     import os
     from pathlib import Path
@@ -53,7 +59,17 @@ def is_model_cached(repo_id: str = PARAKEET_MODEL) -> bool:
     snapshots = folder / "snapshots"
     if not snapshots.is_dir():
         return False
-    return any(any(rev.iterdir()) for rev in snapshots.iterdir() if rev.is_dir())
+
+    def has_weights(revision: Path) -> bool:
+        for pattern in ("*.safetensors", "*.bin", "*.npz"):
+            for candidate in revision.glob(pattern):
+                # Cache entries are symlinks into blobs/; a dangling one means
+                # the blob was never finished or has been garbage collected.
+                if candidate.exists() and candidate.stat().st_size > 0:
+                    return True
+        return False
+
+    return any(has_weights(rev) for rev in snapshots.iterdir() if rev.is_dir())
 
 
 def transcribe_parakeet(audio_path: str, status_callback=None) -> list[dict]:

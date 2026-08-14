@@ -27,32 +27,35 @@ from overheard import live
 class NoImportsAllowed:
     """Turns any import attempt into a failure for the duration of a block.
 
-    Modules already in sys.modules still resolve, since re-importing those is
-    a dict lookup and costs nothing. It is the first-time import that stalls.
+    Only a module already in sys.modules resolves, because that is the dict
+    lookup that costs nothing. Checking the root package instead would wave
+    through every submodule of an already-imported package, which is exactly
+    the regression this guards: scipy.signal is imported at module scope now,
+    so a new `import scipy.interpolate` on the hot path would look harmless.
     """
 
-    def __init__(self, monkeypatch):
-        self._monkeypatch = monkeypatch
+    def __init__(self, monkeypatch=None):
         self.attempted = []
+        self._real_import = None
 
     def __enter__(self):
-        real_import = builtins.__import__
+        self._real_import = builtins.__import__
 
         def guard(name, globals=None, locals=None, fromlist=(), level=0):
-            root = name.split(".")[0]
-            if name not in sys.modules and root not in sys.modules:
+            if name not in sys.modules:
                 self.attempted.append(name)
                 raise AssertionError(
                     f"{name!r} was imported on the audio thread path. "
                     "Import it at module scope instead: a first-time import "
                     "here stalls capture and Core Audio kills the process."
                 )
-            return real_import(name, globals, locals, fromlist, level)
+            return self._real_import(name, globals, locals, fromlist, level)
 
-        self._monkeypatch.setattr(builtins, "__import__", guard)
+        builtins.__import__ = guard
         return self
 
     def __exit__(self, *exc):
+        builtins.__import__ = self._real_import
         return False
 
 
@@ -90,3 +93,22 @@ def test_resampling_still_produces_the_right_rate(src_rate):
     audio = np.zeros(int(src_rate * seconds), dtype=np.float32)
     out = live._resample(audio, src_rate)
     assert abs(len(out) - int(live.TARGET_RATE * seconds)) <= 2
+
+
+def test_the_guard_itself_actually_fires():
+    """Prove the harness can fail before trusting the tests that rely on it.
+
+    The first version of this guard did not fire at all, so every test using it
+    passed while a real first-time import sat on the audio path. A gate nobody
+    has watched fail is not a gate.
+    """
+    import pytest as _pytest
+
+    with _pytest.raises(AssertionError, match="audio thread path"):
+        with NoImportsAllowed():
+            import imaplib  # noqa: F401  chosen because pytest does not preload it
+
+
+def test_the_guard_allows_already_imported_modules():
+    with NoImportsAllowed():
+        import sys as _sys  # noqa: F401  already in sys.modules, so free

@@ -7,7 +7,7 @@ import tempfile
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 import rumps
 
@@ -16,6 +16,9 @@ from overheard.audio import Recorder, find_recording_device, DEFAULT_DEVICE_NAME
 from overheard.protocols import AudioSource
 from overheard.pipeline import transcribe_audio
 from overheard.state import IDLE, PAUSED, RECORDING, TRANSCRIBING
+
+if TYPE_CHECKING:
+    from overheard.details_panel import DetailsPanel
 
 
 
@@ -61,7 +64,9 @@ class TranscriberApp(rumps.App):
         self._recorder: AudioSource | None = None
         self._popover = None     # TransportPopover, built at startup
         self._prefs_window = None
-        self._details_panel: Any = None
+        # A real type, not Any. Using Any on a first-party class silently
+        # suppresses checking, and it hid a misspelled method from the gate.
+        self._details_panel: "DetailsPanel | None" = None
         self._level_timer: rumps.Timer | None = None
         self._gather_poll_timer: rumps.Timer | None = None
         self._live = None          # LiveTranscriber while recording
@@ -350,9 +355,9 @@ class TranscriberApp(rumps.App):
         self._gather_poll_timer = None
         meta = self._pending_meeting_meta
         cal_name, source, cal_location, cal_attendees = meta
-        self._ensure_details_panel()
+        panel = self._ensure_details_panel()
         self._set_state(IDLE, "Fill in details...")
-        self._details_panel.show(
+        panel.show(
             name=cal_name,
             source=source,
             location=cal_location,
@@ -499,13 +504,19 @@ class TranscriberApp(rumps.App):
         self._pending_meeting_meta = None
         self._set_state(IDLE, "Ready")
 
-    def _ensure_details_panel(self):
+    def _ensure_details_panel(self) -> "DetailsPanel":
+        """Build the panel on first use and return it.
+
+        Returning it, rather than only assigning it, is what lets a caller use
+        the panel without the type checker having to trust that this ran.
+        """
         if self._details_panel is None:
             from overheard.details_panel import DetailsPanel
             self._details_panel = DetailsPanel(
                 callback=self._on_details_confirmed,
                 discard_callback=self._on_discard,
             )
+        return self._details_panel
 
 
 def _ensure_utf8() -> None:

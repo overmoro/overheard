@@ -55,37 +55,60 @@ def test_the_level_bar_is_usable_when_built_with_initwithframe():
     assert bar._active is False
 
 
-def test_the_level_bar_draws_without_raising():
-    """Draw it for real, since drawRect_ is where the AttributeError landed.
+def _draw(view):
+    """Draw a view offscreen, which is where the AttributeError landed.
 
-    Drawing needs a focused context, so it happens into an offscreen image
-    rather than a window. No window server interaction is required.
+    Drawing needs a focused context, so it goes into an image rather than a
+    window. No window server interaction is required.
     """
-    bar = popover._LevelBar.alloc().initWithFrame_(NSMakeRect(0, 0, 120, 10))
-    bar.setActive_(True)
-    bar.setLevel_(0.75)
-
-    image = NSImage.alloc().initWithSize_((120, 10))
+    size = (max(1, view.bounds().size.width), max(1, view.bounds().size.height))
+    image = NSImage.alloc().initWithSize_(size)
     image.lockFocus()
     try:
-        bar.drawRect_(bar.bounds())
+        view.drawRect_(view.bounds())
     finally:
         image.unlockFocus()
 
 
 def test_an_undrawn_level_bar_still_draws():
-    """The failing case: never told a level, then asked to draw."""
+    """The failing case: built, never told a level, then asked to draw.
+
+    Calling setLevel_ or setActive_ first would create the very attributes the
+    missing initialiser failed to assign, so a test that sets before drawing
+    can never reach the bug. That is what the first version of this file did.
+    """
+    _draw(popover._LevelBar.alloc().initWithFrame_(NSMakeRect(0, 0, 120, 10)))
+
+
+def test_a_level_bar_draws_after_being_given_a_level():
+    """The ordinary path, drawn only after the undrawn case above has run."""
     bar = popover._LevelBar.alloc().initWithFrame_(NSMakeRect(0, 0, 120, 10))
-    image = NSImage.alloc().initWithSize_((120, 10))
-    image.lockFocus()
-    try:
-        bar.drawRect_(bar.bounds())
-    finally:
-        image.unlockFocus()
+    bar.setActive_(True)
+    bar.setLevel_(0.75)
+    _draw(bar)
 
 
-def test_showing_the_system_meter_row_is_survivable():
-    """configure_channels(True) is the call that unhid the row and killed it."""
+def _all_subviews(view):
+    for sub in view.subviews():
+        yield sub
+        yield from _all_subviews(sub)
+
+
+def test_every_view_in_a_real_popover_can_draw():
+    """The end-to-end guard, and the one that covers _PillButton.
+
+    configure_channels(True) only unhides the row; it does not itself draw, so
+    asserting it returns cleanly proves nothing. What killed the app was the
+    draw that AppKit performed afterwards. This builds the real popover, shows
+    the system meter row, and then draws every view in it.
+    """
     pop = popover.TransportPopover({})
     pop.configure_channels(True)
     assert pop._is_multichannel is True
+
+    drawn = 0
+    for view in _all_subviews(pop._panel.contentView()):
+        if type(view).__module__ == popover.__name__:
+            _draw(view)
+            drawn += 1
+    assert drawn >= 4, f"expected the custom views to be reached, drew {drawn}"
