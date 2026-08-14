@@ -427,11 +427,12 @@ class TransportPopover:
             return
         x, y = self._panel_origin(btn)
         self._panel.setFrameOrigin_((x, y))
-        # LSUIElement apps (no dock icon) must be explicitly activated before
-        # makeKeyAndOrderFront_ — otherwise windowDidResignKey_ fires immediately.
-        from AppKit import NSApplication
-        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-        self._panel.makeKeyAndOrderFront_(None)
+        # orderFront_ rather than makeKeyAndOrderFront_: the transport panel
+        # doesn't need to be the key window (no text input, just buttons).
+        # Avoiding makeKeyAndOrderFront_ + activateIgnoringOtherApps_ prevents
+        # the activation/deactivation cycle that caused the panel to
+        # immediately auto-hide on first click (LSUIElement apps deactivate fast).
+        self._panel.orderFront_(None)
 
     def _panel_origin(self, btn):
         """Return (x, y) screen origin so the panel sits flush below btn."""
@@ -631,6 +632,7 @@ class TransportPopover:
         panel.setHasShadow_(True)
         panel.setLevel_(NSStatusWindowLevel + 1)
         panel.setFloatingPanel_(True)
+        panel.setHidesOnDeactivate_(False)   # don't auto-hide when LSUIElement app deactivates
 
         self._panel = panel
         self._delegate._toggle_cb = self.toggle
