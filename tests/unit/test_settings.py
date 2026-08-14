@@ -117,7 +117,7 @@ class TestCoercion:
         (isolated_config / "config.json").write_text(
             json.dumps({"speaker_match_threshold": "very high"})
         )
-        assert settings.load().speaker_match_threshold == 0.70
+        assert settings.load().speaker_match_threshold == settings.DEFAULTS["speaker_match_threshold"]
         assert "speaker_match_threshold" in capsys.readouterr().err
 
     def test_a_wrongly_typed_string_falls_back(self, isolated_config):
@@ -135,7 +135,7 @@ class TestCoercion:
         )
         cfg.set_value("live_preview", False)
         reloaded = json.loads((isolated_config / "config.json").read_text())
-        assert reloaded["speaker_match_threshold"] == 0.70
+        assert reloaded["speaker_match_threshold"] == settings.DEFAULTS["speaker_match_threshold"]
         assert reloaded["live_preview"] is False
 
 
@@ -151,8 +151,12 @@ class TestTheReadmeDocumentsEverySetting:
         readme = Path(__file__).resolve().parents[2] / "README.md"
         lines = readme.read_text().splitlines()
 
-        header_index = lines.index("| Key | Description |")
-        assert "Default" not in lines[header_index]
+        header_index = next(i for i, line in enumerate(lines)
+                            if line.startswith("| Key |"))
+        columns = [c.strip() for c in lines[header_index].strip("|").split("|")]
+        # Asserted, not matched by equality: matching the exact header string
+        # and then checking that same string for "Default" could never fail.
+        assert columns == ["Key", "Description"]
 
         documented = set()
         for line in lines[header_index + 1:]:

@@ -30,7 +30,12 @@ LIBRARY_PATH = settings.CONFIG_DIR / "speakers.json"
 # Cosine similarity above which two embeddings are treated as the same person.
 # Deliberately cautious: a wrong name on a transcript is worse than a missing
 # one, since the reader has no way to tell it is wrong.
-DEFAULT_THRESHOLD = 0.70
+#
+# Derived, not restated. Writing 0.70 here as well would mean a user who raised
+# speaker_match_threshold in their config still got 0.70 from any caller that
+# relied on this default, which is the two-defaults bug settings.py was built
+# to remove.
+DEFAULT_THRESHOLD = settings.DEFAULTS["speaker_match_threshold"]
 
 
 def build_speaker_map(
