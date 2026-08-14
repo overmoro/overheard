@@ -14,6 +14,7 @@ from overheard import config as cfg
 from overheard.audio import Recorder, find_recording_device, DEFAULT_DEVICE_NAME, SAMPLE_RATE
 from overheard.protocols import AudioSource
 from overheard.pipeline import transcribe_audio
+from overheard.state import IDLE, PAUSED, RECORDING, TRANSCRIBING
 
 
 
@@ -55,7 +56,7 @@ class TranscriberApp(rumps.App):
     def __init__(self):
         icon = _resolve_icon("menubar.png")
         super().__init__("Overheard", icon=icon, template=True, title="")
-        self._state = "idle"
+        self._state = IDLE
         self._recorder: AudioSource | None = None
         self._popover = None     # TransportPopover, built at startup
         self._prefs_window = None
@@ -88,13 +89,13 @@ class TranscriberApp(rumps.App):
     # ------------------------------------------------------------------
 
     def _on_record(self):
-        if self._state == "paused" and self._recorder:
+        if self._state == PAUSED and self._recorder:
             self._recorder.resume()
-            self._set_state("recording", "Recording...")
+            self._set_state(RECORDING, "Recording...")
             self._start_level_timer()
             return
 
-        if self._state != "idle":
+        if self._state != IDLE:
             return
 
         # Give immediate visual feedback, then defer ALL CoreAudio work.
@@ -103,7 +104,7 @@ class TranscriberApp(rumps.App):
         # caused C-level crashes in earlier builds. The timer fires on the main
         # run-loop 50 ms later, well after AppKit has finished unwinding the
         # click event, so UI calls inside the callback remain safe.
-        self._set_state("recording", "Starting...")
+        self._set_state(RECORDING, "Starting...")
 
         def _deferred_start(timer):
             timer.stop()
@@ -174,7 +175,7 @@ class TranscriberApp(rumps.App):
 
         if error is not None:
             rumps.notification("Overheard", "Could not start recording", error)
-            self._set_state("idle", error[:60])
+            self._set_state(IDLE, error[:60])
             return
 
         self._recorder = recorder
@@ -182,7 +183,7 @@ class TranscriberApp(rumps.App):
 
         if self._popover:
             self._popover.configure_channels(recorder.is_multichannel)
-        self._set_state("recording", "Recording...")
+        self._set_state(RECORDING, "Recording...")
         self._start_level_timer()
         self._start_live(recorder)
 
@@ -251,13 +252,13 @@ class TranscriberApp(rumps.App):
                 pass
 
     def _on_pause(self):
-        if self._state == "recording" and self._recorder:
+        if self._state == RECORDING and self._recorder:
             self._recorder.pause()
             self._stop_level_timer()
-            self._set_state("paused", "Paused")
+            self._set_state(PAUSED, "Paused")
 
     def _on_stop(self):
-        if self._state not in ("recording", "paused") or not self._recorder:
+        if self._state not in (RECORDING, PAUSED) or not self._recorder:
             return
 
         self._stop_level_timer()
@@ -272,11 +273,11 @@ class TranscriberApp(rumps.App):
         self._stop_live()
 
         if audio is None or len(audio) == 0:
-            self._set_state("idle", "Ready")
+            self._set_state(IDLE, "Ready")
             rumps.notification("Overheard", "", "No audio captured.")
             return
 
-        self._set_state("idle", "Gathering details...")
+        self._set_state(IDLE, "Gathering details...")
 
         # Reset the shared result slot so the poll timer knows nothing is ready yet.
         self._pending_meeting_meta = None
@@ -342,7 +343,7 @@ class TranscriberApp(rumps.App):
         meta = self._pending_meeting_meta
         cal_name, source, cal_location, cal_attendees = meta
         self._ensure_details_panel()
-        self._set_state("idle", "Fill in details...")
+        self._set_state(IDLE, "Fill in details...")
         self._details_panel.show(
             name=cal_name,
             source=source,
@@ -371,12 +372,12 @@ class TranscriberApp(rumps.App):
         # Mic speaker name for attribution (plumbed through, not yet active)
         mic_speaker = cfg.get("local_speaker_name") or None
 
-        self._set_state("transcribing", "Transcribing...")
+        self._set_state(TRANSCRIBING, "Transcribing...")
 
         def run():
             try:
                 def on_status(msg):
-                    self._set_state("transcribing", msg)
+                    self._set_state(TRANSCRIBING, msg)
 
                 transcribe_audio(
                     tmp_path,
@@ -386,14 +387,14 @@ class TranscriberApp(rumps.App):
                     mic_speaker=mic_speaker,
                     channels_info=channels_info,
                 )
-                self._set_state("idle", "Done \u2713")
+                self._set_state(IDLE, "Done \u2713")
                 subprocess.Popen(["afplay", "/System/Library/Sounds/Glass.aiff"])
                 rumps.notification("Overheard", "Done", f"Saved: {filename}")
             except Exception as e:
                 import traceback
                 traceback.print_exc()
                 msg = str(e)[:80]
-                self._set_state("idle", f"\u2717 {msg}")
+                self._set_state(IDLE, f"\u2717 {msg}")
                 rumps.notification("Overheard", "Error", str(e))
             finally:
                 if cfg.get("keep_recordings"):
@@ -444,19 +445,14 @@ class TranscriberApp(rumps.App):
     def _set_state(self, state: str, status: str = "") -> None:
         self._state = state
         titles = {
-            "idle":         "",
-            "recording":    " \U0001f534",
-            "paused":       " \u23f8",
-            "transcribing": " \u23f3",
+            IDLE:         "",
+            RECORDING:    " \U0001f534",
+            PAUSED:       " \u23f8",
+            TRANSCRIBING: " \u23f3",
         }
         self.title = titles.get(state, "")
         if self._popover:
-            from overheard.state import IDLE, RECORDING, PAUSED, TRANSCRIBING
-            state_map = {
-                "idle": IDLE, "recording": RECORDING,
-                "paused": PAUSED, "transcribing": TRANSCRIBING,
-            }
-            self._popover.set_state(state_map.get(state, IDLE), status)
+            self._popover.set_state(state, status)
 
     def _build_popover(self):
         """Build the panel and hook it to the status bar button."""
@@ -496,7 +492,7 @@ class TranscriberApp(rumps.App):
         self._pending_wav = None
         self._pending_channels_info = None
         self._pending_meeting_meta = None
-        self._set_state("idle", "Ready")
+        self._set_state(IDLE, "Ready")
 
     def _ensure_details_panel(self):
         if self._details_panel is None:
@@ -540,7 +536,7 @@ def main():
     def _init_popover(timer):
         timer.stop()
         app._build_popover()
-        app._set_state("idle", "Ready")
+        app._set_state(IDLE, "Ready")
 
     rumps.Timer(_init_popover, 0.5).start()
 
