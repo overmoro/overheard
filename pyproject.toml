@@ -15,13 +15,18 @@ dependencies = [
     "soundfile>=0.13.0",
     "numpy>=1.24.0",
     "parakeet-mlx>=0.3.0",
-    "pyannote.audio>=3.1.0",
     "scipy>=1.11.0",
 ]
 
+# Diarization and ASR both run through bundled native code by default, so
+# neither torch nor a Hugging Face account is needed for a working install.
+# These extras exist for comparison and as fallbacks.
 [project.optional-dependencies]
 # The original CPU Whisper path, selectable via the "engine" config key.
 whisper = ["whisperx>=3.1.0"]
+# Fallback diarizer, selectable via the "diarizer" config key. Pulls in torch
+# and needs HF_TOKEN for the gated pyannote model.
+pyannote = ["pyannote.audio>=3.1.0", "torch>=2.0.0", "torchaudio>=2.0.0"]
 
 [project.scripts]
 overheard = "overheard.app:main"

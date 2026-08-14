@@ -14,73 +14,21 @@ remains the fallback on macOS older than 14.4 or when tap permission is refused.
 """
 
 import json
-import os
-import platform
 import subprocess
 import sys
 import threading
-from pathlib import Path
 
 import numpy as np
 
-# Core Audio process taps landed in macOS 14.2, but the aggregate-device
-# plumbing this relies on is only dependable from 14.4.
-MIN_MACOS = (14, 4)
+from overheard.helper import capture_available, helper_path
 
 # Frames pulled from the pipe per read
 _READ_FRAMES = 4096
 
 
-def _helper_candidates() -> list[Path]:
-    """Locations to look for the helper, bundle first then repo checkout."""
-    candidates: list[Path] = []
-
-    # Inside a standalone .app the sources live under Contents/Resources/lib/...,
-    # so walking up from __file__ does not reach the bundle's Resources folder.
-    # Derive it from the running executable instead.
-    try:
-        for parent in Path(sys.executable).resolve().parents:
-            if parent.suffix == ".app":
-                candidates.append(parent / "Contents" / "Resources" / "overheard-helper")
-                break
-    except OSError:
-        pass
-
-    # Repo checkout, and py2app alias builds which run straight from the tree
-    root = Path(__file__).parent.parent.parent
-    candidates += [
-        root / "Resources" / "overheard-helper",
-        root / "helper" / ".build" / "release" / "overheard-helper",
-        root / "helper" / ".build" / "arm64-apple-macosx" / "release" / "overheard-helper",
-    ]
-    return candidates
-
-
-def helper_path() -> Path | None:
-    """Path to the helper binary, or None if it hasn't been built."""
-    for candidate in _helper_candidates():
-        if candidate.exists() and os.access(candidate, os.X_OK):
-            return candidate
-    return None
-
-
-def _macos_version() -> tuple[int, ...]:
-    try:
-        return tuple(int(p) for p in platform.mac_ver()[0].split(".")[:2])
-    except (ValueError, IndexError):
-        return (0,)
-
-
 def is_available() -> tuple[bool, str]:
     """Return (available, reason). Reason is empty when available."""
-    if sys.platform != "darwin":
-        return False, "not macOS"
-    if _macos_version() < MIN_MACOS:
-        have = ".".join(str(p) for p in _macos_version())
-        return False, f"macOS {have} predates process taps (needs 14.4)"
-    if helper_path() is None:
-        return False, "overheard-helper not built"
-    return True, ""
+    return capture_available()
 
 
 class TapRecorder:

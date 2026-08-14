@@ -508,12 +508,13 @@ def main():
     _ensure_homebrew_path()
     _output_dir().mkdir(parents=True, exist_ok=True)
 
+    # Diarization runs through the bundled helper and needs no credentials.
+    # A token is only consulted for the optional pyannote fallback, and comes
+    # from the environment when someone deliberately selects it.
     if not os.environ.get("HF_TOKEN"):
         stored = cfg.get("hf_token")
         if stored:
             os.environ["HF_TOKEN"] = stored
-        else:
-            print("Warning: HF_TOKEN not set. Open Preferences... to add it.", file=sys.stderr)
 
     app = TranscriberApp()
 

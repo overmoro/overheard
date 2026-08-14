@@ -13,6 +13,7 @@ word-level timing), which is then diarized and rendered to markdown.
 """
 
 import os
+import sys
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -91,11 +92,7 @@ def _fallback_speaker_names(segments: list[dict], named: dict[str, str]) -> dict
 
 
 def _check_audio_signal(audio_path: str) -> None:
-    """Raise if the recording is effectively silent.
-
-    Catches the common misconfiguration where system output isn't routed
-    through BlackHole, before we spend time loading models.
-    """
+    """Raise if the recording is effectively silent, before loading any models."""
     import numpy as np
     import soundfile as sf
 
@@ -103,8 +100,9 @@ def _check_audio_signal(audio_path: str) -> None:
     rms = float(np.sqrt(np.mean(audio_check ** 2)))
     if rms < 0.0001:
         raise RuntimeError(
-            f"Audio appears silent (RMS={rms:.6f}). "
-            "Set your Mac system output to 'Meeting Monitor' so audio routes through BlackHole."
+            f"Audio appears silent (RMS={rms:.6f}). Check that Overheard has "
+            "microphone access in System Settings, and that the meeting audio "
+            "was playing through your selected output device."
         )
 
 
@@ -374,21 +372,104 @@ def _transcribe_whisper(
 # ----------------------------------------------------------------------------
 
 
-def _diarize(audio_path: str, status_callback=None) -> list[dict]:
-    """Run pyannote speaker diarization.
+def _diarize(
+    audio_path: str, status_callback=None, max_speakers: int | None = None
+) -> list[dict]:
+    """Run speaker diarization, returning {start, end, speaker} turns.
 
-    Returns a list of {start, end, speaker} turns, or an empty list if
-    diarization is unavailable. A missing HF_TOKEN is not fatal: the transcript
-    is still worth having without speaker labels.
+    FluidAudio is the default: it runs on the Neural Engine, needs no Hugging
+    Face account or gated model, and measured 104x realtime against pyannote's
+    roughly 1x on the same audio. pyannote remains as a fallback, selectable
+    with the ``diarizer`` config key, but its dependencies are now optional.
+
+    Returns an empty list when diarization is unavailable. That is deliberately
+    not fatal: a transcript without speaker labels is still worth having.
     """
-    import torch
+    backend = (cfg.get("diarizer", "auto") or "auto").lower()
 
+    if backend in ("auto", "fluidaudio"):
+        turns = _diarize_fluidaudio(
+            audio_path, status_callback=status_callback, max_speakers=max_speakers
+        )
+        if turns is not None:
+            return turns
+        if backend == "fluidaudio":
+            return []
+        print("[overheard] FluidAudio diarization unavailable, trying pyannote",
+              file=sys.stderr)
+
+    return _diarize_pyannote(audio_path, status_callback=status_callback)
+
+
+def _diarize_fluidaudio(
+    audio_path: str, status_callback=None, max_speakers: int | None = None
+) -> list[dict] | None:
+    """Diarize through overheard-helper. Returns None if it could not run.
+
+    None and [] mean different things here: None is "this backend is
+    unavailable, try another", [] is "it ran and found no speech".
+    """
+    import json
+    import subprocess
+
+    from overheard.helper import helper_path
+
+    binary = helper_path()
+    if binary is None:
+        return None
+
+    if status_callback:
+        status_callback("Diarizing...")
+
+    argv = [str(binary), "diarize", audio_path]
+    if max_speakers and max_speakers > 0:
+        # An upper bound rather than an exact count: the attendee list says who
+        # was invited, not how many of them actually spoke.
+        argv += ["--max-speakers", str(int(max_speakers))]
+
+    try:
+        result = subprocess.run(argv, capture_output=True, timeout=1800)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"[overheard] helper diarize failed: {e}", file=sys.stderr)
+        return None
+
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()[:200]
+        print(f"[overheard] helper diarize exited {result.returncode}: {detail}",
+              file=sys.stderr)
+        return None
+
+    try:
+        payload = json.loads(result.stdout.decode("utf-8", "replace"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        print(f"[overheard] could not parse diarize output: {e}", file=sys.stderr)
+        return None
+
+    return [
+        {
+            "start": float(segment["start"]),
+            "end": float(segment["end"]),
+            "speaker": segment["speaker"],
+        }
+        for segment in payload.get("segments", [])
+        if segment.get("end", 0) > segment.get("start", 0)
+    ]
+
+
+def _diarize_pyannote(audio_path: str, status_callback=None) -> list[dict]:
+    """Fallback diarization through pyannote.
+
+    Kept for comparison and for machines where the helper cannot run. Needs
+    HF_TOKEN in the environment and pulls in torch, so it is an optional extra
+    rather than a default dependency.
+    """
     if status_callback:
         status_callback("Diarizing...")
 
     hf_token = os.environ.get("HF_TOKEN")
 
     try:
+        import torch
         from pyannote.audio import Pipeline
         import torchaudio
 
@@ -547,6 +628,14 @@ def transcribe_audio(
     prefixes = {"mic": "MIC", "system": "SYS", "mixed": "SPEAKER"}
     results: dict[str, dict] = {}
 
+    # The attendee list bounds how many distinct voices to expect. It's an
+    # upper bound, not a count: being invited isn't the same as speaking.
+    attendee_count = (
+        len([a for a in meeting_details.attendees if a])
+        if meeting_details is not None and meeting_details.attendees
+        else 0
+    )
+
     try:
         for track in tracks:
             label = track["label"]
@@ -566,7 +655,11 @@ def transcribe_audio(
                     status_callback=status_callback if len(tracks) == 1 else None,
                 )
 
-            turns = _diarize(track["path"], status_callback=status_callback)
+            turns = _diarize(
+                track["path"],
+                status_callback=status_callback,
+                max_speakers=attendee_count or None,
+            )
             turns, order = _canonicalize_turns(turns, prefix=prefixes[label])
             results[label] = {
                 "segments": _assign_speakers(segments, turns),

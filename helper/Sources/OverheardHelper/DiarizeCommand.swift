@@ -11,6 +11,42 @@ import Foundation
 /// omitted unless asked for: they are 256 floats per segment and dwarf the rest
 /// of the payload, but they are what makes cross-meeting speaker identity
 /// possible, so they are available on request.
+/// Fetch the diarization models ahead of time.
+///
+/// They download on first use anyway; doing it explicitly moves the wait out of
+/// the first meeting and into Preferences, where it is expected.
+func runDownload(_ arguments: [String]) -> Never {
+    if arguments.contains("--help") {
+        print(
+            """
+            overheard-helper download
+
+            Downloads the speaker diarization models. No credentials required.
+            Safe to re-run: existing models are reused.
+            """)
+        exit(0)
+    }
+
+    let semaphore = DispatchSemaphore(value: 0)
+    var exitCode: Int32 = 0
+
+    Task {
+        defer { semaphore.signal() }
+        do {
+            _ = try await OfflineDiarizerModels.load()
+            Status.emit(
+                "done",
+                ["directory": OfflineDiarizerModels.defaultModelsDirectory().path])
+        } catch {
+            Status.emit("fatal", ["code": "download_failed", "message": "\(error)"])
+            exitCode = 1
+        }
+    }
+
+    semaphore.wait()
+    exit(exitCode)
+}
+
 func runDiarize(_ arguments: [String]) -> Never {
     var audioPath: String?
     var outputPath: String?

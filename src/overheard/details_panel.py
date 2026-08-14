@@ -54,7 +54,9 @@ class MeetingDetails:
     name: str
     source: str               # 'zoom', 'teams', 'meet', 'in-person', 'other'
     location: str
-    attendees: list[str]      # ordered — index maps to SPEAKER_00, SPEAKER_01...
+    # Ordered. The local speaker is identified from the mic track; the rest
+    # fill remaining speakers in order of first speech.
+    attendees: list[str]
     date: datetime = field(default_factory=datetime.now)
 
 

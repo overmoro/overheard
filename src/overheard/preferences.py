@@ -1,7 +1,7 @@
 """Preferences window for Overheard.
 
 Opens as a standalone NSPanel so it doesn't block the rumps run loop.
-Sections: Audio Setup, Hugging Face Token, Dependencies, Output Folder.
+Sections: General, Audio, Transcription, Output, Integrations.
 """
 
 import os
@@ -152,18 +152,6 @@ class _PreferencesDelegate(NSObject):
         ok, msg = create_multi_output_device()
         self._multiout_status.setStringValue_(f"{'✓' if ok else '✗'} {msg}")
 
-    # ---- HF Token ----------------------------------------------------------
-
-    def saveToken_(self, sender):
-        token = self._token_field.stringValue().strip()
-        if not token:
-            self._token_status.setStringValue_("✗ Token is empty")
-            return
-        _write_hf_token_to_zshrc(token)
-        cfg.set_value("hf_token", token)
-        os.environ["HF_TOKEN"] = token
-        self._token_status.setStringValue_("✓ Saved")
-
     # ---- Engine ------------------------------------------------------------
 
     def selectEngine_(self, sender):
@@ -210,19 +198,19 @@ class _PreferencesDelegate(NSObject):
                 )
                 return
 
-            hf_token = os.environ.get("HF_TOKEN", "")
-            if hf_token:
-                self._deps_status.setStringValue_("Downloading pyannote diarization model...")
+            # Warm the diarization models too. The helper fetches them on first
+            # use with no credentials, so this only saves the wait later.
+            from overheard.helper import helper_path
+            binary = helper_path()
+            if binary is not None:
+                self._deps_status.setStringValue_("Downloading speaker models...")
                 result = subprocess.run(
-                    ["python3", "-c",
-                     "from pyannote.audio import Pipeline; "
-                     f"Pipeline.from_pretrained('pyannote/speaker-diarization-3.1',"
-                     f" use_auth_token='{hf_token}')"],
-                    capture_output=True, text=True, timeout=600,
+                    [str(binary), "download"],
+                    capture_output=True, text=True, timeout=1800,
                 )
                 if result.returncode != 0:
                     self._deps_status.setStringValue_(
-                        f"✓ {label} done  ✗ Pyannote failed: {result.stderr[:80]}"
+                        f"✓ {label} done  ✗ Speaker models: {result.stderr[:80]}"
                     )
                     return
 
@@ -313,33 +301,6 @@ class _PreferencesDelegate(NSObject):
             self._calendar_status.setStringValue_("✗ Timed out. Check System Settings → Privacy → Calendars")
         except Exception as e:
             self._calendar_status.setStringValue_(f"✗ {e}")
-
-
-# ---------------------------------------------------------------------------
-# HF Token helpers
-# ---------------------------------------------------------------------------
-
-def _write_hf_token_to_zshrc(token: str) -> None:
-    """Write or update the HF_TOKEN export line in ~/.zshrc."""
-    zshrc = Path.home() / ".zshrc"
-    export_line = f'export HF_TOKEN="{token}"'
-    lines = []
-    replaced = False
-
-    if zshrc.exists():
-        with open(zshrc) as f:
-            lines = f.readlines()
-        for i, line in enumerate(lines):
-            if line.strip().startswith("export HF_TOKEN="):
-                lines[i] = export_line + "\n"
-                replaced = True
-                break
-
-    if not replaced:
-        lines.append(export_line + "\n")
-
-    with open(zshrc, "w") as f:
-        f.writelines(lines)
 
 
 def _device_exists(name: str) -> str:
@@ -496,32 +457,13 @@ class PreferencesWindow:
         self._delegate._live_check = live_check
         y -= 42
 
-        pane.addSubview_(_make_label("Hugging Face Token", 20, y, 300, 22, bold=True))
-        y -= 10
+        pane.addSubview_(_make_label("Speakers", 20, y, 300, 22, bold=True))
+        y -= 26
         pane.addSubview_(_make_label(
-            "Required for speaker diarization (pyannote). Get one at huggingface.co.",
+            "Speaker labelling runs on the Neural Engine. No account or token needed.",
             20, y, PW, 18,
         ))
-        y -= 34
-
-        self._delegate._token_field = _make_text_field(
-            20, y, PW - 90, 24,
-            placeholder="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-            secure=True,
-        )
-        if os.environ.get("HF_TOKEN"):
-            self._delegate._token_field.setStringValue_(os.environ["HF_TOKEN"])
-        pane.addSubview_(self._delegate._token_field)
-        pane.addSubview_(_make_button("Save", PW - 64, y, 80, 24,
-                                     "saveToken:", self._delegate))
-        y -= 28
-
-        self._delegate._token_status = _make_status(20, y, PW)
-        self._delegate._token_status.setStringValue_(
-            "✓ Token is currently set" if os.environ.get("HF_TOKEN") else "No token set"
-        )
-        pane.addSubview_(self._delegate._token_status)
-        y -= 50
+        y -= 44
 
         pane.addSubview_(_make_label("AI Models", 20, y, 300, 22, bold=True))
         y -= 36
@@ -529,7 +471,7 @@ class PreferencesWindow:
         pane.addSubview_(_make_button("Download Models", 20, y, 160, 28,
                                      "downloadModels:", self._delegate))
         self._delegate._deps_status = _make_status(190, y + 5, PW - 170)
-        self._delegate._deps_status.setStringValue_("Whisper large-v3 + pyannote")
+        self._delegate._deps_status.setStringValue_("Downloads on first use")
         pane.addSubview_(self._delegate._deps_status)
 
         # ================================================================== #

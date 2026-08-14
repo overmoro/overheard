@@ -13,6 +13,7 @@ guard let command = arguments.first else {
 
           capture    Stream system audio (and the mic) captured via Core Audio taps
           diarize    Speaker diarization on the Apple Neural Engine
+          download   Fetch the diarization models ahead of first use
 
         Run a subcommand with --help for its options.
         """)
@@ -26,6 +27,8 @@ case "capture":
     runCapture(rest)
 case "diarize":
     runDiarize(rest)
+case "download":
+    runDownload(rest)
 case "--version", "version":
     print(version)
     exit(0)

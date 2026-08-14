@@ -22,6 +22,9 @@ DEFAULTS = {
     "live_preview": True,
     # Capture backend: "auto" (tap when available), "tap", or "device"
     "capture_backend": "auto",
+    # Diarizer: "auto" (FluidAudio, falling back to pyannote), "fluidaudio",
+    # or "pyannote". pyannote needs HF_TOKEN and the optional extra installed.
+    "diarizer": "auto",
 }
 
 
