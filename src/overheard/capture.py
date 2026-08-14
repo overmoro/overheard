@@ -11,6 +11,7 @@ user is already listening to.
 TapRecorder deliberately mirrors audio.Recorder's interface (start/stop/pause/
 resume/get_levels/set_tap) so the two are interchangeable, and audio.Recorder
 remains the fallback on macOS older than 14.4 or when tap permission is refused.
+That shared interface is written down as ``protocols.AudioSource``.
 """
 
 import json
@@ -63,12 +64,12 @@ class TapRecorder:
     # ------------------------------------------------------------------
 
     @property
-    def _is_multichannel(self) -> bool:
+    def is_multichannel(self) -> bool:
         """True when a separate mic track is present (drives the popover meters)."""
         return self.channels > 1
 
     @property
-    def _channels_info(self) -> dict | None:
+    def channels_info(self) -> dict | None:
         if self.channels < 2:
             return None
         return {"mic_channel": 0, "system_channels": [1]}
@@ -147,7 +148,7 @@ class TapRecorder:
         audio = np.concatenate(self._chunks, axis=0)
         self._chunks = []
         self._level_buf = None
-        return audio, self._channels_info
+        return audio, self.channels_info
 
     def get_levels(self) -> tuple[float, float]:
         """Return (mic_rms, system_rms) from the most recent block."""

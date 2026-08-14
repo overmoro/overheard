@@ -97,15 +97,15 @@ class Recorder:
 
         if avail >= self._MIN_MULTICHANNEL:
             self.channels = avail
-            self._is_multichannel = True
-            self._channels_info: dict | None = {
+            self.is_multichannel = True
+            self.channels_info: dict | None = {
                 "mic_channel": avail - 1,
                 "system_channels": list(range(avail - 1)),
             }
         else:
             self.channels = channels
-            self._is_multichannel = False
-            self._channels_info = None
+            self.is_multichannel = False
+            self.channels_info = None
 
         self._chunks: list[np.ndarray] = []
         self._paused: bool = False
@@ -196,7 +196,7 @@ class Recorder:
         audio = np.concatenate(self._chunks, axis=0)
         self._chunks = []
         self._level_buf = None
-        return audio, self._channels_info
+        return audio, self.channels_info
 
     def get_levels(self) -> tuple[float, float]:
         """Return (mic_rms, system_rms) from the last captured audio buffer.
@@ -208,9 +208,9 @@ class Recorder:
         if buf is None or len(buf) == 0:
             return 0.0, 0.0
 
-        if self._is_multichannel and self._channels_info is not None:
-            mic_ch = self._channels_info["mic_channel"]
-            sys_chs = self._channels_info["system_channels"]
+        if self.is_multichannel and self.channels_info is not None:
+            mic_ch = self.channels_info["mic_channel"]
+            sys_chs = self.channels_info["system_channels"]
             mic_rms = float(np.sqrt(np.mean(buf[:, mic_ch] ** 2)))
             if sys_chs:
                 sys_data = buf[:, sys_chs]

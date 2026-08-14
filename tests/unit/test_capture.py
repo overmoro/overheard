@@ -155,14 +155,33 @@ def test_tap_receives_blocks_and_errors_are_contained():
 def test_channels_info_contract():
     """The layout the transcription pipeline relies on.
 
-    Uses the underscore names deliberately: they are the interface today, and
-    app.py reads them. Phase 2 promotes them to public, at which point this test
-    is the thing that proves the rename did not change behaviour.
+    Written against ``_channels_info`` / ``_is_multichannel`` when app.py read
+    those private names directly. Phase 2 promoted them, so the names here moved
+    with them; every value asserted is unchanged, which is what shows the rename
+    was a rename and not a rewrite.
     """
     stereo = TapRecorder()
-    assert stereo._channels_info == {"mic_channel": 0, "system_channels": [1]}
-    assert stereo._is_multichannel is True
+    assert stereo.channels_info == {"mic_channel": 0, "system_channels": [1]}
+    assert stereo.is_multichannel is True
 
     mono = TapRecorder(capture_mic=False)
-    assert mono._channels_info is None
-    assert mono._is_multichannel is False
+    assert mono.channels_info is None
+    assert mono.is_multichannel is False
+
+
+def test_both_backends_satisfy_the_audio_source_protocol():
+    """The Protocol only earns its place if it actually matches both backends.
+
+    isinstance on a runtime_checkable Protocol is a hasattr check, so this
+    catches a member being renamed on one backend and not the other. It cannot
+    catch a signature drifting; that is what the type checker is for.
+    """
+    from overheard.audio import Recorder
+    from overheard.protocols import AudioSource
+
+    assert isinstance(TapRecorder(), AudioSource)
+
+    # Device -1 never resolves, so Recorder falls through to its mono defaults
+    # without opening a stream. Building one is the point: half its interface is
+    # assigned in __init__ rather than declared on the class.
+    assert isinstance(Recorder(-1), AudioSource)

@@ -12,6 +12,7 @@ import rumps
 
 from overheard import config as cfg
 from overheard.audio import Recorder, find_recording_device, DEFAULT_DEVICE_NAME, SAMPLE_RATE
+from overheard.protocols import AudioSource
 from overheard.transcribe import transcribe_audio
 
 
@@ -55,7 +56,7 @@ class TranscriberApp(rumps.App):
         icon = _resolve_icon("menubar.png")
         super().__init__("Overheard", icon=icon, template=True, title="")
         self._state = "idle"
-        self._recorder: Recorder | None = None
+        self._recorder: AudioSource | None = None
         self._popover = None     # TransportPopover, built at startup
         self._prefs_window = None
         self._details_panel = None
@@ -118,12 +119,15 @@ class TranscriberApp(rumps.App):
 
         rumps.Timer(_deferred_start, 0.05).start()
 
-    def _make_recorder(self):
+    def _make_recorder(self) -> AudioSource:
         """Pick a capture backend.
 
         Prefers Core Audio process taps, which need no BlackHole install, no
         aggregate devices and no output rerouting. Falls back to the input
         device recorder when taps are unavailable.
+
+        Either way the result satisfies AudioSource, which is the only thing
+        the rest of this class may assume about it.
         """
         backend = cfg.get("capture_backend", "auto")
 
@@ -177,7 +181,7 @@ class TranscriberApp(rumps.App):
         self._record_rate = recorder.sample_rate
 
         if self._popover:
-            self._popover.configure_channels(recorder._is_multichannel)
+            self._popover.configure_channels(recorder.is_multichannel)
         self._set_state("recording", "Recording...")
         self._start_level_timer()
         self._start_live(recorder)
@@ -205,11 +209,11 @@ class TranscriberApp(rumps.App):
             if self._live_panel is None:
                 self._live_panel = LiveTranscriptPanel()
 
-            live = LiveTranscriber(recorder.sample_rate, recorder._channels_info)
+            live = LiveTranscriber(recorder.sample_rate, recorder.channels_info)
 
             # Streaming speaker attribution, only useful when the mic and
             # system arrive on separate channels.
-            if cfg.get("live_speakers", True) and recorder._channels_info:
+            if cfg.get("live_speakers", True) and recorder.channels_info:
                 from overheard.live import LiveDiarizer
                 diarizer = LiveDiarizer()
                 if diarizer.start():
