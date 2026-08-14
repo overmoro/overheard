@@ -7,6 +7,7 @@ import tempfile
 import threading
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import rumps
 
@@ -60,7 +61,7 @@ class TranscriberApp(rumps.App):
         self._recorder: AudioSource | None = None
         self._popover = None     # TransportPopover, built at startup
         self._prefs_window = None
-        self._details_panel = None
+        self._details_panel: Any = None
         self._level_timer: rumps.Timer | None = None
         self._gather_poll_timer: rumps.Timer | None = None
         self._live = None          # LiveTranscriber while recording
@@ -76,6 +77,12 @@ class TranscriberApp(rumps.App):
 
     @rumps.clicked("Open Transcripts")
     def open_transcripts(self, _):
+        d = _output_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        os.system(f'open "{d}"')
+
+    def _reveal_transcripts(self) -> None:
+        """Open the transcripts folder, creating it if this is the first run."""
         d = _output_dir()
         d.mkdir(parents=True, exist_ok=True)
         os.system(f'open "{d}"')
@@ -173,9 +180,10 @@ class TranscriberApp(rumps.App):
         self._pending_recorder = None
         self._pending_recorder_error = None
 
-        if error is not None:
-            rumps.notification("Overheard", "Could not start recording", error)
-            self._set_state(IDLE, error[:60])
+        if recorder is None:
+            detail = error or "capture did not start"
+            rumps.notification("Overheard", "Could not start recording", detail)
+            self._set_state(IDLE, detail[:60])
             return
 
         self._recorder = recorder
@@ -297,7 +305,7 @@ class TranscriberApp(rumps.App):
 
             # Calendar: isolated sub-thread with hard join timeout so a
             # TCC dialog or slow iCloud sync can never block the gather thread.
-            _mi = [None]
+            _mi: list = [None]
             def _cal():
                 try:
                     from overheard.cal import get_current_meeting
@@ -461,10 +469,7 @@ class TranscriberApp(rumps.App):
             "record":           self._on_record,
             "pause":            self._on_pause,
             "stop":             self._on_stop,
-            "open_transcripts": lambda: (
-                _output_dir().mkdir(parents=True, exist_ok=True) or
-                os.system(f'open "{_output_dir()}"')
-            ),
+            "open_transcripts": self._reveal_transcripts,
             "preferences":      self._open_preferences_cb,
         })
         try:
@@ -516,9 +521,91 @@ def _ensure_homebrew_path() -> None:
         os.environ["PATH"] = homebrew_bin + ":" + current
 
 
-def main():
+#: Kept alive for the process lifetime: faulthandler writes to this handle from
+#: a signal handler, and a closed file there would lose the very backtrace we
+#: are trying to capture.
+_diagnostics_log = None
+
+
+def _log_path() -> Path:
+    return Path.home() / "Library" / "Logs" / "Overheard" / "overheard.log"
+
+
+def _enable_crash_diagnostics() -> None:
+    """Leave a trace when the app dies, because a bundled .app cannot.
+
+    Launched from Finder there is nowhere for stderr to go, so a crash and a
+    clean quit look identical from the outside: the menu bar icon disappears
+    and nothing is written down.
+
+    Two gaps are closed here. First, stderr is teed to a log file, so the two
+    dozen diagnostic prints scattered through the app survive. Second,
+    faulthandler is registered for SIGTRAP, which it does not install by
+    default: ``faulthandler.enable`` covers SIGSEGV, SIGABRT, SIGBUS, SIGFPE
+    and SIGILL only. SIGTRAP is the signal Core Audio's watchdog raises when a
+    realtime thread is starved, and it is what killed the app silently, so the
+    one failure we most needed to see was the one nothing was watching for.
+
+    ``chain=True`` so the process still dies as it would have. This records
+    what happened; it does not pretend to survive it.
+    """
     import faulthandler
-    faulthandler.enable()   # print C-level backtraces to stderr on crash
+    import signal
+
+    global _diagnostics_log
+
+    try:
+        path = _log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _diagnostics_log = open(path, "a", buffering=1, encoding="utf-8")
+    except OSError:
+        # No log is survivable; refusing to start over it is not.
+        faulthandler.enable()
+        return
+
+    _diagnostics_log.write(
+        f"\n=== Overheard started {datetime.now():%Y-%m-%d %H:%M:%S} ===\n"
+    )
+
+    class _Tee:
+        """Write to both the real stderr and the log.
+
+        Both, not just the log: running from a terminal during development
+        should still print where the developer is looking.
+        """
+
+        def __init__(self, *streams):
+            self._streams = [s for s in streams if s is not None]
+
+        def write(self, data):
+            for stream in self._streams:
+                try:
+                    stream.write(data)
+                except (OSError, ValueError):
+                    pass
+            return len(data)
+
+        def flush(self):
+            for stream in self._streams:
+                try:
+                    stream.flush()
+                except (OSError, ValueError):
+                    pass
+
+    sys.stderr = _Tee(sys.stderr, _diagnostics_log)
+
+    faulthandler.enable(file=_diagnostics_log, all_threads=True)
+    if hasattr(signal, "SIGTRAP"):
+        try:
+            faulthandler.register(
+                signal.SIGTRAP, file=_diagnostics_log, all_threads=True, chain=True
+            )
+        except (OSError, ValueError, RuntimeError):
+            pass
+
+
+def main():
+    _enable_crash_diagnostics()
     _ensure_homebrew_path()
     _output_dir().mkdir(parents=True, exist_ok=True)
 
