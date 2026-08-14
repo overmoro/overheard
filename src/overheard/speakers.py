@@ -55,7 +55,7 @@ def build_speaker_map(
     is deterministic and explainable, but still a guess. Additional mic speakers
     occur when several people share the laptop in an in-person meeting.
     """
-    known: dict[str, str] = dict(known or {})
+    known = dict(known or {})
     mapping: dict[str, str] = dict(known)
     claimed = {name.strip().casefold() for name in known.values()}
     # Guard against whitespace-only entries: the details panel has free-text

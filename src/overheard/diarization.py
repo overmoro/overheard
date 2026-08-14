@@ -196,7 +196,7 @@ def assign_speakers(segments: list[dict], turns: list[dict]) -> list[dict]:
         return best
 
     regrouped: list[dict] = []
-    current = turns[0]["speaker"]
+    current: str = turns[0]["speaker"]
 
     for seg in segments:
         words = seg.get("words") or []
@@ -207,7 +207,7 @@ def assign_speakers(segments: list[dict], turns: list[dict]) -> list[dict]:
             continue
 
         run: list[dict] = []
-        run_speaker = None
+        run_speaker: str = current
         for word in words:
             speaker = speaker_at(word["start"], word["end"]) or current
             if run and speaker != run_speaker:

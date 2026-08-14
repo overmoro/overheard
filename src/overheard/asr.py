@@ -58,7 +58,7 @@ def transcribe_parakeet(audio_path: str, status_callback=None) -> list[dict]:
 
     segments = []
     for sentence in result.sentences:
-        words = []
+        words: list[dict] = []
         for token in sentence.tokens:
             # A leading space marks the start of a new word; anything else is a
             # continuation of the word already in progress.
