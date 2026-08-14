@@ -60,7 +60,10 @@ def _build_speaker_map(
     known: dict[str, str] = dict(known or {})
     mapping: dict[str, str] = dict(known)
     claimed = {name.strip().casefold() for name in known.values()}
-    remaining = [a for a in attendees if a and a.strip().casefold() not in claimed]
+    # Guard against whitespace-only entries: the details panel has free-text
+    # attendee fields, and a name of "  " would render as a broken [[ ]] link.
+    remaining = [a for a in attendees
+                 if a.strip() and a.strip().casefold() not in claimed]
 
     # Also guard against handing out a name the library already claimed for a
     # different voice, which would show one person as two speakers.
@@ -692,7 +695,7 @@ def transcribe_audio(
     # The attendee list bounds how many distinct voices to expect. It's an
     # upper bound, not a count: being invited isn't the same as speaking.
     attendee_count = (
-        len([a for a in meeting_details.attendees if a])
+        len([a for a in meeting_details.attendees if a and a.strip()])
         if meeting_details is not None and meeting_details.attendees
         else 0
     )
@@ -812,7 +815,8 @@ def transcribe_audio(
         ]
         used = {speaker_map[label].strip().casefold() for label in confident
                 if speaker_map.get(label)}
-        unclaimed = [a for a in attendees if a and a.strip().casefold() not in used]
+        unclaimed = [a for a in attendees
+                     if a.strip() and a.strip().casefold() not in used]
         if len(unknown_remote) == 1 and len(unclaimed) == 1:
             confident.add(unknown_remote[0])
 
@@ -847,7 +851,8 @@ def _write_markdown(
         meeting_title = f"[[{meeting_details.name}]]" if meeting_details.name else "[[Meeting]]"
         attendee_lines = ""
         if meeting_details.attendees:
-            formatted = [f'  - "[[{name}]]"' for name in meeting_details.attendees if name]
+            formatted = [f'  - "[[{name.strip()}]]"'
+                         for name in meeting_details.attendees if name and name.strip()]
             if formatted:
                 attendee_lines = "\n" + "\n".join(formatted)
         else:

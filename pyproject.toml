@@ -27,6 +27,39 @@ whisper = ["whisperx>=3.1.0"]
 # Fallback diarizer, selectable via the "diarizer" config key. Pulls in torch
 # and needs HF_TOKEN for the gated pyannote model.
 pyannote = ["pyannote.audio>=3.1.0", "torch>=2.0.0", "torchaudio>=2.0.0"]
+dev = ["pytest>=7.0.0", "pytest-cov>=4.0.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Unit tests must stay hermetic and fast: no models, no helper binary, no
+# network. Integration tests need the built helper and downloaded models, and
+# skip themselves when those are absent so a fresh checkout still passes.
+markers = [
+    "integration: needs the built helper, downloaded models, or `say`",
+]
+addopts = "-q --strict-markers"
+
+[tool.coverage.run]
+source = ["overheard"]
+# AppKit view construction and Core Audio device setup need a real window server
+# or real hardware. Including them only produces a misleading denominator; they
+# are covered by the integration smoke tests and by running the app.
+omit = [
+    "*/app.py",
+    "*/popover.py",
+    "*/preferences.py",
+    "*/details_panel.py",
+    "*/transport.py",
+    "*/live_panel.py",
+    "*/cal.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
 
 [project.scripts]
 overheard = "overheard.app:main"

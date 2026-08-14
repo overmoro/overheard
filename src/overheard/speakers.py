@@ -93,15 +93,24 @@ class SpeakerLibrary:
 
     def match(self, embedding, threshold: float = DEFAULT_THRESHOLD) -> tuple[str | None, float]:
         """Best matching name for an embedding, or (None, score)."""
-        best_name, best_score = None, 0.0
+        # best_score starts unset rather than at 0.0: cosine similarity runs from
+        # -1 to 1, and flooring at zero reported 0.0 for a genuinely negative
+        # match, which made the returned score useless for diagnosing a
+        # threshold and stopped comparisons working over the full range.
+        best_name: str | None = None
+        best_score: float | None = None
+
         for name, entry in self._entries.items():
             stored = entry.get("embedding")
             if not stored:
                 continue
             score = _cosine(embedding, stored)
-            if score > best_score:
+            if best_score is None or score > best_score:
                 best_name, best_score = name, score
-        if best_name is not None and best_score >= threshold:
+
+        if best_score is None:
+            return None, 0.0      # nothing stored to compare against
+        if best_score >= threshold:
             return best_name, best_score
         return None, best_score
 
