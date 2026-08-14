@@ -158,6 +158,17 @@ def save(changes: dict) -> None:
 
     Keys the schema does not know about are kept rather than dropped: they may
     belong to a newer version of the app that ran against the same file.
+
+    ``load_dict()`` is deliberately in that merge, not ``read_raw()`` alone.
+    That means a stored value too mangled to coerce gets rewritten as the
+    declared default here, even when the caller only meant to change some
+    other, unrelated key. The alternative, carrying the raw value through
+    untouched, would print a warning to stderr on every future read for as
+    long as that value sits in the file. Repairing it here warns once, from
+    the ``_coerce`` call inside this same save, and the file is valid from
+    then on. The same merge is also why every declared key ends up written to
+    the file the first time anything is saved; that is existing behaviour and
+    this docstring is not changing it.
     """
     unknown = set(changes) - set(_FIELDS)
     if unknown:

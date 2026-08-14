@@ -122,3 +122,17 @@ class TestCoercion:
     def test_a_wrongly_typed_string_falls_back(self, isolated_config):
         (isolated_config / "config.json").write_text(json.dumps({"engine": 3}))
         assert settings.load().engine == "parakeet"
+
+    def test_an_uncoercible_value_is_repaired_by_an_unrelated_write(self, isolated_config):
+        """A write to one key also repairs a different key that was already broken.
+
+        This is deliberate, not incidental: repairing once and warning once
+        beats carrying the bad value forward and warning on every future read.
+        """
+        (isolated_config / "config.json").write_text(
+            json.dumps({"speaker_match_threshold": "very high"})
+        )
+        cfg.set_value("live_preview", False)
+        reloaded = json.loads((isolated_config / "config.json").read_text())
+        assert reloaded["speaker_match_threshold"] == 0.70
+        assert reloaded["live_preview"] is False
