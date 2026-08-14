@@ -148,6 +148,8 @@ class Recorder:
 
         block = 1024   # frames per read (~23 ms at 44100 Hz)
 
+        stop_event = self._stop_event   # bound once: stop() clears the attribute
+
         def _record_loop():
             try:
                 with sd.InputStream(
@@ -156,7 +158,7 @@ class Recorder:
                     samplerate=self.sample_rate,
                     blocksize=block,
                 ) as stream:
-                    while not self._stop_event.is_set():
+                    while not stop_event.is_set():
                         data, overflowed = stream.read(block)
                         if overflowed:
                             print("Audio: input overflow", file=sys.stderr)

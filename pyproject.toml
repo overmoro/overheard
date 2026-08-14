@@ -27,7 +27,7 @@ whisper = ["whisperx>=3.1.0"]
 # Fallback diarizer, selectable via the "diarizer" config key. Pulls in torch
 # and needs HF_TOKEN for the gated pyannote model.
 pyannote = ["pyannote.audio>=3.1.0", "torch>=2.0.0", "torchaudio>=2.0.0"]
-dev = ["pytest>=7.0.0", "pytest-cov>=4.0.0", "mypy>=1.11"]
+dev = ["pytest>=7.0.0", "pytest-cov>=4.0.0", "mypy>=1.11", "ruff>=0.6"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -64,9 +64,23 @@ exclude_lines = [
 files = ["src/overheard"]
 python_version = "3.11"
 ignore_missing_imports = true
+# Without this, method bodies with no annotations are skipped entirely, which
+# is most of the AppKit code. A reviewer proved the gap by deleting an import
+# and watching mypy stay green while pyflakes caught it instantly.
+check_untyped_defs = true
 
 [project.scripts]
 overheard = "overheard.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+src = ["src"]
+
+[tool.ruff.lint]
+# F is pyflakes: undefined names, unused imports, shadowed definitions. It
+# catches the class of bug that shipped twice in this repo (a name used in a
+# method that never imported it) in milliseconds, and it catches it whether or
+# not the function carries type annotations.
+select = ["F"]

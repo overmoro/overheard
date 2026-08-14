@@ -6,7 +6,6 @@ attendee list order (convention). The precedence between them is the part that
 went wrong before, so it is what these tests pin down.
 """
 
-import pytest
 
 from overheard.diarization import canonicalize_turns
 from overheard.render import fallback_speaker_names

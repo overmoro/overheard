@@ -20,7 +20,8 @@ from AppKit import (
     NSTableView,
     NSTextField,
 )
-from Foundation import NSObject, NSMutableArray
+from Foundation import NSObject
+from typing import Any
 
 try:
     from AppKit import (
@@ -210,9 +211,10 @@ class DetailsPanel:
     def __init__(self, callback, discard_callback=None):
         self._callback = callback
         self._discard_callback = discard_callback
-        self._window = None
-        self._delegate = None
-        self._data_source = None
+        self._window: Any = None
+        # Both are built by _build, which show() calls before reading them.
+        self._delegate: Any = None
+        self._data_source: Any = None
 
     def show(
         self,

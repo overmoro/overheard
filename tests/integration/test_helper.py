@@ -17,7 +17,7 @@ import soundfile as sf
 
 from overheard.helper import helper_path
 
-from ..conftest import requires_helper, requires_say
+from ..conftest import requires_helper
 
 pytestmark = [pytest.mark.integration, requires_helper]
 

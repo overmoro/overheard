@@ -23,5 +23,8 @@ jobs:
           cache: pip
       - run: python3 -m pip install --upgrade pip
       - run: python3 -m pip install -e '.[dev]'
+      # Lint first: it is the fastest of the three and catches the undefined
+      # name class outright, which is the bug that shipped twice here.
+      - run: python3 -m ruff check .
       - run: python3 -m pytest tests/unit
       - run: python3 -m mypy

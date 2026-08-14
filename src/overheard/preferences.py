@@ -24,10 +24,11 @@ from AppKit import (
     NSOpenPanel,
     NSView,
 )
-from Foundation import NSObject, NSString
+from Foundation import NSObject
 
 from overheard import config as cfg
 from overheard.audio import create_aggregate_device, create_multi_output_device
+from typing import Any
 
 # Window dimensions
 WIN_W = 500
@@ -335,6 +336,32 @@ class _PreferencesDelegate(NSObject):
             self._calendar_status.setStringValue_(f"✗ {e}")
 
 
+def _model_status() -> str:
+    """Describe what is actually on disk, rather than assuming nothing is.
+
+    This label used to read "Downloads on first use" unconditionally, which was
+    indistinguishable from a real check and wrong for anyone who had already
+    downloaded.
+    """
+    from overheard import config as cfg
+    from overheard.asr import PARAKEET_MODEL, WHISPER_REPO, is_model_cached
+    from overheard.helper import diarization_models_present
+
+    engine = cfg.get("engine")
+    repo = WHISPER_REPO if engine == "whisper" else PARAKEET_MODEL
+    have_asr = is_model_cached(repo)
+    have_diar = diarization_models_present()
+
+    if have_asr and have_diar:
+        return "\u2713 Installed"
+    missing = []
+    if not have_asr:
+        missing.append("transcription")
+    if not have_diar:
+        missing.append("speaker")
+    return "Missing: " + " and ".join(missing) + " models"
+
+
 def _device_exists(name: str) -> str:
     """Return a status string for whether a named audio device is present."""
     try:
@@ -358,7 +385,7 @@ class PreferencesWindow:
     """
 
     def __init__(self):
-        self._window = None
+        self._window: Any = None
         self._delegate = None
 
     def show(self) -> None:
@@ -393,7 +420,6 @@ class PreferencesWindow:
 
         # Inner pane dimensions (inside the tab chrome)
         PW = WIN_W - 40   # pane width available for content
-        BOTTOM = 20       # y baseline inside each pane
 
         # ================================================================== #
         # Tab 1: General
@@ -424,7 +450,17 @@ class PreferencesWindow:
         y = 340
 
         pane.addSubview_(_make_label("Recording Devices", 20, y, 300, 22, bold=True))
-        y -= 36
+        y -= 26
+
+        from overheard.capture import is_available as _tap_available
+        _tap_ok, _tap_why = _tap_available()
+        pane.addSubview_(_make_label(
+            "Capturing through Core Audio process taps. No extra devices needed."
+            if _tap_ok else
+            f"Process taps unavailable ({_tap_why}). The fallback below needs BlackHole.",
+            20, y, PW, 16,
+        ))
+        y -= 30
 
         btn_agg = _make_button("Create Recording Device", 20, y, 210, 28,
                                "createRecordingDevice:", self._delegate)
@@ -443,9 +479,10 @@ class PreferencesWindow:
         y -= 50
 
         pane.addSubview_(_make_label(
-            "Creates CoreAudio aggregate devices combining BlackHole 2ch\n"
-            "and your MacBook microphone/speakers for meeting capture.",
-            20, y, PW, 32,
+            "Legacy fallback, for Macs where process taps are unavailable.\n"
+            "Builds CoreAudio aggregates from BlackHole 2ch and your built-in\n"
+            "microphone and speakers. Not needed when taps are working.",
+            20, y, PW, 46,
         ))
 
         # ================================================================== #
@@ -524,7 +561,7 @@ class PreferencesWindow:
         pane.addSubview_(_make_button("Download Models", 20, y, 160, 28,
                                      "downloadModels:", self._delegate))
         self._delegate._deps_status = _make_status(190, y + 5, PW - 170)
-        self._delegate._deps_status.setStringValue_("Downloads on first use")
+        self._delegate._deps_status.setStringValue_(_model_status())
         pane.addSubview_(self._delegate._deps_status)
 
         # ================================================================== #

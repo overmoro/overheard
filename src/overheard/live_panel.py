@@ -23,6 +23,7 @@ from AppKit import (
     NSMakeRange,
 )
 from Foundation import NSObject, NSTimer
+from typing import Any
 
 PANEL_W = 380
 PANEL_H = 420
@@ -67,7 +68,7 @@ class LiveTranscriptPanel:
     """Floating window showing the running live transcript."""
 
     def __init__(self):
-        self._panel = None
+        self._panel: Any = None
         self._text_view = None
         self._timer = None
         self._poll_target = None
