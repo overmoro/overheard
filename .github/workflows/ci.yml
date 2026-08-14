@@ -1,0 +1,27 @@
+name: CI
+
+# The integration tier needs the built Swift helper binary, multi-GB models
+# and macOS `say`; those tests skip themselves when those are absent, so
+# running them here would produce a green tick that verified nothing. Only
+# the unit tier runs.
+#
+# The runner is macOS, not Linux, because tests/unit/test_live.py imports
+# overheard.live_panel, which imports AppKit at module level. That import
+# happens at collection time, before any test runs, so the unit tier cannot
+# even be collected on a non-macOS runner.
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python3 -m pip install --upgrade pip
+      - run: python3 -m pip install -e '.[dev]'
+      - run: python3 -m pytest tests/unit
+      - run: python3 -m mypy
