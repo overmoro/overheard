@@ -52,7 +52,7 @@ def transcribe_audio(
     Returns:
         The output_path on success.
     """
-    engine = (engine or cfg.get("engine", "parakeet")).lower()
+    engine = (engine or cfg.get("engine")).lower()
     if engine not in ("parakeet", "whisper"):
         raise ValueError(f"Unknown transcription engine: {engine!r}")
 
@@ -64,7 +64,7 @@ def transcribe_audio(
     prefixes = {"mic": "MIC", "system": "SYS", "mixed": "SPEAKER"}
     results: dict[str, dict] = {}
 
-    remember_speakers = bool(cfg.get("speaker_memory", True))
+    remember_speakers = cfg.get("speaker_memory")
 
     # The attendee list bounds how many distinct voices to expect. It's an
     # upper bound, not a count: being invited isn't the same as speaking.
@@ -147,7 +147,7 @@ def transcribe_audio(
             library = SpeakerLibrary()
             known = library.match_labels(
                 label_embeddings,
-                threshold=float(cfg.get("speaker_match_threshold", 0.70)),
+                threshold=cfg.get("speaker_match_threshold"),
             )
             if known:
                 print(f"[overheard] recognised by voice: {sorted(known.values())}",

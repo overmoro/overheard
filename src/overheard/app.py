@@ -18,7 +18,7 @@ from overheard.pipeline import transcribe_audio
 
 
 def _output_dir() -> Path:
-    return Path(cfg.get("output_dir", str(Path.home() / "overheard" / "transcripts")))
+    return Path(cfg.get("output_dir"))
 
 
 def _resolve_output_path(filename: str) -> Path:
@@ -27,9 +27,9 @@ def _resolve_output_path(filename: str) -> Path:
     If Obsidian integration is enabled and configured, write to vault/inbox/.
     Otherwise fall back to the configured output directory.
     """
-    if cfg.get("obsidian_enabled", False):
-        vault = cfg.get("obsidian_vault", "")
-        inbox = cfg.get("obsidian_inbox", "01_Inbox")
+    if cfg.get("obsidian_enabled"):
+        vault = cfg.get("obsidian_vault")
+        inbox = cfg.get("obsidian_inbox")
         if vault:
             dest = Path(vault) / inbox
             dest.mkdir(parents=True, exist_ok=True)
@@ -129,7 +129,7 @@ class TranscriberApp(rumps.App):
         Either way the result satisfies AudioSource, which is the only thing
         the rest of this class may assume about it.
         """
-        backend = cfg.get("capture_backend", "auto")
+        backend = cfg.get("capture_backend")
 
         if backend in ("auto", "tap"):
             from overheard.capture import TapRecorder, is_available
@@ -196,7 +196,7 @@ class TranscriberApp(rumps.App):
         Failures here are non-fatal: live transcription is a convenience, and
         the authoritative transcript is still produced after the meeting.
         """
-        if not cfg.get("live_preview", True):
+        if not cfg.get("live_preview"):
             return
         try:
             from overheard.live import LiveTranscriber, is_available
@@ -213,7 +213,7 @@ class TranscriberApp(rumps.App):
 
             # Streaming speaker attribution, only useful when the mic and
             # system arrive on separate channels.
-            if cfg.get("live_speakers", True) and recorder.channels_info:
+            if cfg.get("live_speakers") and recorder.channels_info:
                 from overheard.live import LiveDiarizer
                 diarizer = LiveDiarizer()
                 if diarizer.start():
@@ -396,7 +396,7 @@ class TranscriberApp(rumps.App):
                 self._set_state("idle", f"\u2717 {msg}")
                 rumps.notification("Overheard", "Error", str(e))
             finally:
-                if cfg.get("keep_recordings", False):
+                if cfg.get("keep_recordings"):
                     audio_path = output_path.replace(".md", ".wav")
                     os.rename(tmp_path, audio_path)
                 else:

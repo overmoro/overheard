@@ -29,7 +29,7 @@ def diarize(
     Returns an empty list when diarization is unavailable. That is deliberately
     not fatal: a transcript without speaker labels is still worth having.
     """
-    backend = (cfg.get("diarizer", "auto") or "auto").lower()
+    backend = cfg.get("diarizer").lower()
 
     if backend in ("auto", "fluidaudio"):
         turns = _diarize_fluidaudio(

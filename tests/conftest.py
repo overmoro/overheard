@@ -56,11 +56,13 @@ def isolated_config(tmp_path, monkeypatch):
     Without this, tests would read and write the developer's real settings and
     voice library.
     """
-    from overheard import config as cfg
+    from overheard import settings
     from overheard import speakers
 
-    monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(cfg, "CONFIG_PATH", tmp_path / "config.json")
+    # settings owns the path, and config.py deliberately does not re-export it:
+    # two names for one path means patching the copy redirects nothing.
+    monkeypatch.setattr(settings, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(settings, "CONFIG_PATH", tmp_path / "config.json")
     monkeypatch.setattr(speakers, "LIBRARY_PATH", tmp_path / "speakers.json")
     return tmp_path
 

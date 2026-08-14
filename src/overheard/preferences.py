@@ -126,7 +126,7 @@ class _PreferencesDelegate(NSObject):
     def openTranscripts_(self, sender):
         from overheard import config as _cfg
         from pathlib import Path as _Path
-        d = _Path(_cfg.get("output_dir", str(_Path.home() / "overheard" / "transcripts")))
+        d = _Path(_cfg.get("output_dir"))
         d.mkdir(parents=True, exist_ok=True)
         os.system(f'open "{d}"')
 
@@ -208,7 +208,7 @@ class _PreferencesDelegate(NSObject):
         try:
             # Only fetch the model for the engine actually in use. Whisper
             # large-v3 is a 3 GB download nobody on Parakeet needs.
-            engine = cfg.get("engine", "parakeet")
+            engine = cfg.get("engine")
             if engine == "whisper":
                 self._deps_status.setStringValue_("Downloading whisper large-v3...")
                 code = ("import whisperx; "
@@ -456,7 +456,7 @@ class PreferencesWindow:
         y = 340
         from AppKit import NSPopUpButton, NSButton as _NSBtn
 
-        current_engine = cfg.get("engine", "parakeet")
+        current_engine = cfg.get("engine")
         if current_engine not in _ENGINES:
             current_engine = "parakeet"
 
@@ -482,7 +482,7 @@ class PreferencesWindow:
         live_check = _NSBtn.alloc().initWithFrame_(NSMakeRect(20, y, PW, 20))
         live_check.setButtonType_(3)   # NSButtonTypeSwitch
         live_check.setTitle_("Show live transcript while recording")
-        live_check.setState_(1 if cfg.get("live_preview", True) else 0)
+        live_check.setState_(1 if cfg.get("live_preview") else 0)
         live_check.setTarget_(self._delegate)
         live_check.setAction_("toggleLivePreview:")
         live_check.setEnabled_(current_engine == "parakeet")
@@ -501,7 +501,7 @@ class PreferencesWindow:
         remember_check = _NSBtn.alloc().initWithFrame_(NSMakeRect(20, y, PW, 20))
         remember_check.setButtonType_(3)
         remember_check.setTitle_("Recognise returning speakers by voice")
-        remember_check.setState_(1 if cfg.get("speaker_memory", True) else 0)
+        remember_check.setState_(1 if cfg.get("speaker_memory") else 0)
         remember_check.setTarget_(self._delegate)
         remember_check.setAction_("toggleSpeakerMemory:")
         pane.addSubview_(remember_check)
@@ -538,7 +538,7 @@ class PreferencesWindow:
         pane.addSubview_(_make_label("Transcript Folder", 20, y, 300, 22, bold=True))
         y -= 36
 
-        current_output = cfg.get("output_dir", str(Path.home() / "overheard" / "transcripts"))
+        current_output = cfg.get("output_dir")
         self._delegate._output_field = _make_text_field(
             20, y, PW - 100, 24, placeholder="~/overheard/transcripts/",
         )
@@ -555,7 +555,7 @@ class PreferencesWindow:
         keep_btn = _NSButton.alloc().initWithFrame_(NSMakeRect(20, y, PW, 20))
         keep_btn.setButtonType_(3)
         keep_btn.setTitle_("Keep audio recordings after transcription")
-        keep_btn.setState_(1 if cfg.get("keep_recordings", False) else 0)
+        keep_btn.setState_(1 if cfg.get("keep_recordings") else 0)
         keep_btn.setTarget_(self._delegate)
         keep_btn.setAction_("toggleKeepRecordings:")
         pane.addSubview_(keep_btn)
@@ -566,7 +566,7 @@ class PreferencesWindow:
         # ================================================================== #
         pane = _make_tab("Integrations")
         y = 340
-        obsidian_enabled = bool(cfg.get("obsidian_enabled", False))
+        obsidian_enabled = cfg.get("obsidian_enabled")
 
         pane.addSubview_(_make_label("Obsidian", 20, y, 300, 22, bold=True))
         y -= 30
@@ -584,7 +584,7 @@ class PreferencesWindow:
         pane.addSubview_(_make_label("Vault:", 20, y, 60, 20))
         obs_vault_field = _make_text_field(84, y, PW - 160, 24,
                                            placeholder="/Users/you/Documents/MyVault")
-        obs_vault_field.setStringValue_(cfg.get("obsidian_vault", ""))
+        obs_vault_field.setStringValue_(cfg.get("obsidian_vault"))
         obs_vault_field.setEnabled_(obsidian_enabled)
         pane.addSubview_(obs_vault_field)
         self._delegate._obsidian_vault_field = obs_vault_field
@@ -597,7 +597,7 @@ class PreferencesWindow:
 
         pane.addSubview_(_make_label("Inbox:", 20, y, 60, 20))
         obs_inbox_field = _make_text_field(84, y, 180, 24, placeholder="01_Inbox")
-        obs_inbox_field.setStringValue_(cfg.get("obsidian_inbox", "01_Inbox"))
+        obs_inbox_field.setStringValue_(cfg.get("obsidian_inbox"))
         obs_inbox_field.setEnabled_(obsidian_enabled)
         obs_inbox_field.setTarget_(self._delegate)
         obs_inbox_field.setAction_("saveObsidianInbox:")
@@ -619,7 +619,7 @@ class PreferencesWindow:
 
         pane.addSubview_(_make_label("Speaker name:", 20, y, 110, 20))
         local_speaker_field = _make_text_field(134, y, 160, 24, placeholder="Don")
-        local_speaker_field.setStringValue_(cfg.get("local_speaker_name", "Don"))
+        local_speaker_field.setStringValue_(cfg.get("local_speaker_name"))
         local_speaker_field.setTarget_(self._delegate)
         local_speaker_field.setAction_("saveLocalSpeakerName:")
         pane.addSubview_(local_speaker_field)

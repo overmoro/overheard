@@ -164,7 +164,7 @@ class LiveTranscriptPanel:
 
         from overheard import config as cfg
 
-        local_name = cfg.get("local_speaker_name", "You") or "You"
+        local_name = cfg.get("local_speaker_name") or cfg.DEFAULTS["local_speaker_name"]
         diarizer = getattr(transcriber, "diarizer", None)
 
         lines: list[str] = []

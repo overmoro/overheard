@@ -23,9 +23,9 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from overheard import config as cfg
+from overheard import settings
 
-LIBRARY_PATH = cfg.CONFIG_DIR / "speakers.json"
+LIBRARY_PATH = settings.CONFIG_DIR / "speakers.json"
 
 # Cosine similarity above which two embeddings are treated as the same person.
 # Deliberately cautious: a wrong name on a transcript is worse than a missing
