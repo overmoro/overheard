@@ -459,7 +459,7 @@ class TransportPopover:
             self._panel.orderOut_(None)
 
     def set_state(self, state, status=""):
-        from overheard.transport import IDLE, RECORDING, PAUSED, TRANSCRIBING
+        from overheard.state import IDLE, RECORDING, PAUSED, TRANSCRIBING
 
         enabled = {
             IDLE:         (True,  False, False),

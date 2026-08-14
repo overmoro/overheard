@@ -451,7 +451,7 @@ class TranscriberApp(rumps.App):
         }
         self.title = titles.get(state, "")
         if self._popover:
-            from overheard.transport import IDLE, RECORDING, PAUSED, TRANSCRIBING
+            from overheard.state import IDLE, RECORDING, PAUSED, TRANSCRIBING
             state_map = {
                 "idle": IDLE, "recording": RECORDING,
                 "paused": PAUSED, "transcribing": TRANSCRIBING,

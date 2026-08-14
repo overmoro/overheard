@@ -49,7 +49,6 @@ omit = [
     "*/popover.py",
     "*/preferences.py",
     "*/details_panel.py",
-    "*/transport.py",
     "*/live_panel.py",
     "*/cal.py",
 ]
