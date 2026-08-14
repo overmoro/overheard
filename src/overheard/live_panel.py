@@ -145,10 +145,58 @@ class LiveTranscriptPanel:
             self._last_status = status
             self._panel.setTitle_(f"Live Transcript  ({status})")
 
-        text = t.text
+        text = self._render(t)
         if text != self._last_text:
             self._last_text = text
             self._set_text(text)
+
+    def _render(self, transcriber) -> str:
+        """Attribute each sentence to a speaker and lay it out for display.
+
+        Two sources of attribution, used in order of how much they can be
+        trusted. Which track carried the audio is a measurement, so it decides
+        local versus remote. Among remote voices, the streaming diarizer's
+        speaker index is the only signal available live.
+        """
+        sentences = transcriber.sentences
+        if not sentences:
+            return transcriber.text
+
+        from overheard import config as cfg
+
+        local_name = cfg.get("local_speaker_name", "You") or "You"
+        diarizer = getattr(transcriber, "diarizer", None)
+
+        lines: list[str] = []
+        previous: str | None = None
+        # Sortformer's indices are positional and can start anywhere, so number
+        # remote voices by when they first speak. The local speaker is named
+        # separately, so a lone "Speaker 2" with no Speaker 1 would just puzzle.
+        display_numbers: dict[int, int] = {}
+
+        for sentence in sentences:
+            share = transcriber.local_share(sentence["start"], sentence["end"])
+            if share > 0.60:
+                speaker = local_name
+            elif diarizer is not None and diarizer.available:
+                index = diarizer.speaker_at((sentence["start"] + sentence["end"]) / 2)
+                if index is None:
+                    speaker = "Speaker"
+                else:
+                    if index not in display_numbers:
+                        display_numbers[index] = len(display_numbers) + 1
+                    speaker = f"Speaker {display_numbers[index]}"
+            else:
+                speaker = "Remote"
+
+            if speaker != previous:
+                if lines:
+                    lines.append("")
+                lines.append(f"{speaker}:")
+                previous = speaker
+            lines.append(sentence["text"])
+
+        return "\n".join(lines)
 
     def _set_text(self, text: str) -> None:
         if self._text_view is None:

@@ -206,6 +206,15 @@ class TranscriberApp(rumps.App):
                 self._live_panel = LiveTranscriptPanel()
 
             live = LiveTranscriber(recorder.sample_rate, recorder._channels_info)
+
+            # Streaming speaker attribution, only useful when the mic and
+            # system arrive on separate channels.
+            if cfg.get("live_speakers", True) and recorder._channels_info:
+                from overheard.live import LiveDiarizer
+                diarizer = LiveDiarizer()
+                if diarizer.start():
+                    live.diarizer = diarizer
+
             live.start()
             recorder.set_tap(live.feed)
             self._live = live
@@ -221,6 +230,11 @@ class TranscriberApp(rumps.App):
     def _stop_live(self):
         """Stop live transcription, leaving the final text visible."""
         if self._live is not None:
+            try:
+                if getattr(self._live, "diarizer", None) is not None:
+                    self._live.diarizer.stop()
+            except Exception:
+                pass
             try:
                 self._live.stop()
             except Exception:

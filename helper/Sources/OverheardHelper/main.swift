@@ -15,6 +15,7 @@ guard let command = arguments.first else {
           diarize    Speaker diarization on the Apple Neural Engine
           download   Fetch the diarization models ahead of first use
           processes  List processes currently running audio
+          diarize-stream  Streaming diarization for the live transcript
 
         Run a subcommand with --help for its options.
         """)
@@ -32,6 +33,8 @@ case "download":
     runDownload(rest)
 case "processes":
     runProcesses(rest)
+case "diarize-stream":
+    runDiarizeStream(rest)
 case "--version", "version":
     print(version)
     exit(0)

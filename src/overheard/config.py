@@ -25,6 +25,9 @@ DEFAULTS = {
     # Diarizer: "auto" (FluidAudio, falling back to pyannote), "fluidaudio",
     # or "pyannote". pyannote needs HF_TOKEN and the optional extra installed.
     "diarizer": "auto",
+    # Label speakers in the live transcript using streaming diarization.
+    # Needs separate mic and system tracks; at most four concurrent speakers.
+    "live_speakers": True,
     # Remember voices between meetings so returning speakers are recognised
     # without relying on the attendee list order.
     "speaker_memory": True,

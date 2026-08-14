@@ -15,7 +15,9 @@ into AppKit from the worker thread. The UI polls it from a main-thread timer,
 which keeps every AppKit call on the main thread.
 """
 
+import json
 import queue
+import subprocess
 import sys
 import threading
 
@@ -84,6 +86,109 @@ def _resample(audio: np.ndarray, src_rate: int) -> np.ndarray:
     return resample_poly(audio, ratio.numerator, ratio.denominator).astype(np.float32)
 
 
+class LiveDiarizer:
+    """Streaming speaker attribution via the helper's Sortformer pipeline.
+
+    Sortformer assigns speakers as audio arrives rather than clustering the
+    whole recording afterwards, which is the only way to attribute speech live.
+    Two limits come with that: at most four concurrent speakers, and labels that
+    are positional rather than identities. The transcript written at the end
+    still comes from the offline diarizer, so nothing here has to be perfect.
+    """
+
+    MAX_SPEAKERS = 4
+
+    def __init__(self):
+        self._proc: subprocess.Popen | None = None
+        self._reader: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._segments: list[tuple[float, float, int]] = []
+        self._failed = False
+
+    @property
+    def available(self) -> bool:
+        return not self._failed and self._proc is not None
+
+    def start(self) -> bool:
+        """Launch the diarizer. Returns False if it could not start."""
+        from overheard.helper import helper_path
+
+        binary = helper_path()
+        if binary is None:
+            self._failed = True
+            return False
+        try:
+            self._proc = subprocess.Popen(
+                [str(binary), "diarize-stream"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, bufsize=0,
+            )
+        except OSError as e:
+            print(f"[overheard] live diarizer failed to start: {e}", file=sys.stderr)
+            self._failed = True
+            return False
+
+        self._reader = threading.Thread(target=self._read, daemon=True)
+        self._reader.start()
+        return True
+
+    def feed(self, mono16k: np.ndarray) -> None:
+        """Send 16 kHz mono audio. Never blocks the caller for long."""
+        proc = self._proc
+        if proc is None or proc.stdin is None:
+            return
+        try:
+            proc.stdin.write(mono16k.astype(np.float32).tobytes())
+        except (BrokenPipeError, ValueError, OSError):
+            self._failed = True
+            self._proc = None
+
+    def speaker_at(self, when: float) -> int | None:
+        """Speaker index active at a point in time, or None."""
+        with self._lock:
+            for start, end, speaker in reversed(self._segments):
+                if start <= when <= end:
+                    return speaker
+        return None
+
+    def stop(self) -> None:
+        proc = self._proc
+        self._proc = None
+        if proc is None:
+            return
+        try:
+            if proc.stdin:
+                proc.stdin.close()      # EOF makes the helper finalize cleanly
+            proc.wait(timeout=3.0)
+        except (subprocess.TimeoutExpired, OSError):
+            proc.kill()
+        if self._reader:
+            self._reader.join(timeout=2.0)
+            self._reader = None
+
+    def _read(self) -> None:
+        proc = self._proc
+        if proc is None or proc.stdout is None:
+            return
+        for raw in proc.stdout:
+            try:
+                msg = json.loads(raw.decode("utf-8", "replace"))
+            except json.JSONDecodeError:
+                continue
+            if msg.get("type") != "segment":
+                continue
+            start, end = float(msg["start"]), float(msg["end"])
+            speaker = int(msg["speaker"])
+            with self._lock:
+                # Tentative segments get revised, so replace any overlapping
+                # entry from the same speaker rather than accumulating dupes.
+                self._segments = [
+                    s for s in self._segments
+                    if not (s[2] == speaker and s[0] == start)
+                ]
+                self._segments.append((start, end, speaker))
+
+
 class LiveTranscriber:
     """Streams recorded audio through Parakeet and exposes a running transcript."""
 
@@ -101,8 +206,16 @@ class LiveTranscriber:
 
         self._lock = threading.Lock()
         self._text = ""
+        self._sentences: list[dict] = []
         self._status = "Loading model..."
         self._ready = False
+
+        # Per-chunk energy on each track, used to tell the local speaker apart
+        # from the remote side. With separate tracks this is a direct
+        # measurement rather than the inference it would be on a mixed signal.
+        self._energy: list[tuple[float, float, float, float]] = []
+        self._elapsed = 0.0
+        self.diarizer: LiveDiarizer | None = None
 
         # Partial block held between feed() calls until it reaches CHUNK_SECONDS
         self._pending = np.empty(0, dtype=np.float32)
@@ -117,6 +230,28 @@ class LiveTranscriber:
         """The running transcript. Safe to read from any thread."""
         with self._lock:
             return self._text
+
+    @property
+    def sentences(self) -> list[dict]:
+        """Running transcript as {start, end, text, speaker}, newest last."""
+        with self._lock:
+            return list(self._sentences)
+
+    def local_share(self, start: float, end: float) -> float:
+        """Fraction of energy in a window that came from the microphone.
+
+        Near 1.0 means the local speaker, near 0.0 the remote side. Returns 0.5
+        when there is nothing to judge by, so neither side is favoured.
+        """
+        mic_total = system_total = 0.0
+        with self._lock:
+            for chunk_start, chunk_end, mic, system in self._energy:
+                if chunk_end <= start or chunk_start >= end:
+                    continue
+                mic_total += mic
+                system_total += system
+        total = mic_total + system_total
+        return mic_total / total if total > 1e-12 else 0.5
 
     @property
     def status(self) -> str:
@@ -145,6 +280,7 @@ class LiveTranscriber:
         if self._stop_event.is_set():
             return
         try:
+            self._record_energy(block)
             mono = _resample(_to_mono(block, self.channels_info), self.sample_rate)
             self._pending = np.concatenate([self._pending, mono])
 
@@ -152,8 +288,28 @@ class LiveTranscriber:
                 chunk = self._pending[: self._chunk_frames]
                 self._pending = self._pending[self._chunk_frames:]
                 self._enqueue(chunk)
+                if self.diarizer is not None and self.diarizer.available:
+                    self.diarizer.feed(chunk)
         except Exception as e:
             print(f"[overheard] live feed error: {e}", file=sys.stderr)
+
+    def _record_energy(self, block: np.ndarray) -> None:
+        """Log mic and system energy for this block against the session clock."""
+        if block.ndim < 2 or block.shape[1] < 2:
+            return
+        mic_ch = (self.channels_info or {}).get("mic_channel")
+        sys_chs = [c for c in ((self.channels_info or {}).get("system_channels") or [])
+                   if 0 <= c < block.shape[1]]
+        if mic_ch is None or not (0 <= mic_ch < block.shape[1]) or not sys_chs:
+            return
+
+        duration = len(block) / self.sample_rate
+        mic = float(np.sum(block[:, mic_ch] ** 2))
+        system = float(np.sum(block[:, sys_chs].mean(axis=1) ** 2))
+        with self._lock:
+            start = self._elapsed
+            self._elapsed += duration
+            self._energy.append((start, self._elapsed, mic, system))
 
     def stop(self, timeout: float = 3.0) -> str:
         """Stop the worker and return the final live transcript."""
@@ -190,6 +346,22 @@ class LiveTranscriber:
             if ready is not None:
                 self._ready = ready
 
+    def _publish(self, result) -> None:
+        """Snapshot the decoder's sentences with their timings."""
+        sentences = []
+        for sentence in getattr(result, "sentences", []) or []:
+            text = (sentence.text or "").strip()
+            if not text:
+                continue
+            sentences.append({
+                "start": float(sentence.start),
+                "end": float(sentence.end),
+                "text": text,
+            })
+        with self._lock:
+            self._sentences = sentences
+            self._text = (result.text or "").strip()
+
     def _run(self) -> None:
         """Worker thread: own the model, drain the queue, update the transcript."""
         try:
@@ -215,7 +387,7 @@ class LiveTranscriber:
                     except queue.Empty:
                         continue
                     stream.add_audio(mx.array(chunk))
-                    self._set(text=stream.result.text.strip())
+                    self._publish(stream.result)
 
                 # Drain whatever is still queued so the tail is not lost
                 while True:
@@ -224,7 +396,8 @@ class LiveTranscriber:
                     except queue.Empty:
                         break
                     stream.add_audio(mx.array(chunk))
-                self._set(text=stream.result.text.strip(), status="Stopped")
+                self._publish(stream.result)
+                self._set(status="Stopped")
         except Exception as e:
             import traceback
             traceback.print_exc()
