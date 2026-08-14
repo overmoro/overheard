@@ -1,10 +1,13 @@
 """Overheard — menu bar popover transport UI."""
 
 import math
+from typing import Any
 
 import objc
 from AppKit import (
     NSApplication,
+    NSMenu,
+    NSMenuItem,
     NSBackingStoreBuffered,
     NSButton,
     NSColor,
@@ -22,6 +25,8 @@ from AppKit import (
     NSView,
 )
 from Foundation import NSAttributedString, NSObject, NSTimer
+
+from overheard.state import IDLE, PAUSED, RECORDING, TRANSCRIBING
 
 # ---------------------------------------------------------------------------
 # Geometry
@@ -263,7 +268,10 @@ class _DragHeader(NSView):
 
     def mouseDragged_(self, event):
         win = self.window()
-        if win is None or self._drag_start is None:
+        # Both are set together in mouseDown_, so checking only _drag_start and
+        # then dereferencing _drag_event_loc was a guard that did not cover what
+        # it guarded.
+        if win is None or self._drag_start is None or self._drag_event_loc is None:
             return
         loc    = event.locationInWindow()
         dx     = loc.x - self._drag_event_loc.x
@@ -341,7 +349,6 @@ class _PopoverDelegate(NSObject):
                 self._toggle_cb()
 
     def _show_context_menu(self, sender):
-        from AppKit import NSMenu, NSMenuItem
         menu = NSMenu.alloc().init()
 
         show_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -358,8 +365,11 @@ class _PopoverDelegate(NSObject):
         quit_item.setTarget_(self)
         menu.addItem_(quit_item)
 
-        # Show at the status bar button position
-        sender.popUpContextMenu_withEvent_forView_(
+        # Class method on NSMenu, not an instance method on the button.
+        # Sending it to the status item button raises AttributeError, which is
+        # how this path stayed broken after the missing import was fixed: the
+        # menu was built and then thrown away one line later.
+        NSMenu.popUpContextMenu_withEvent_forView_(
             menu,
             NSApplication.sharedApplication().currentEvent(),
             sender,
@@ -392,16 +402,17 @@ class TransportPopover:
 
     def __init__(self, callbacks: dict):
         self._delegate        = _PopoverDelegate.alloc().initWithCallbacks_(callbacks)
-        self._panel           = None
-        self._status_btn      = None   # status bar button (for positioning)
-        self._btn_record      = None
-        self._btn_pause       = None
-        self._btn_stop        = None
-        self._status_lbl      = None
-        self._mic_bar         = None
-        self._sys_bar         = None
-        self._mic_row         = None
-        self._sys_row         = None
+        # Filled in by _build below, which runs before anything reads them.
+        self._panel:      Any = None
+        self._status_btn: Any = None   # status bar button (for positioning)
+        self._btn_record: Any = None
+        self._btn_pause:  Any = None
+        self._btn_stop:   Any = None
+        self._status_lbl: Any = None
+        self._mic_bar:    Any = None
+        self._sys_bar:    Any = None
+        self._mic_row:    Any = None
+        self._sys_row:    Any = None
         self._is_multichannel = False
         self._build(callbacks)
 
@@ -450,7 +461,6 @@ class TransportPopover:
         # Fallback: top-right of main screen (reasonable for menu bar items)
         from AppKit import NSScreen
         sf = NSScreen.mainScreen().frame()
-        mbar_h = NSScreen.mainScreen().visibleFrame().size.height
         y = sf.size.height - POP_H   # just below top of screen
         x = sf.size.width - POP_W - 8
         return x, y
@@ -460,8 +470,6 @@ class TransportPopover:
             self._panel.orderOut_(None)
 
     def set_state(self, state, status=""):
-        from overheard.state import IDLE, RECORDING, PAUSED, TRANSCRIBING
-
         enabled = {
             IDLE:         (True,  False, False),
             RECORDING:    (False, True,  True),
