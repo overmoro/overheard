@@ -1,4 +1,4 @@
-"""Overheard — menu bar application."""
+"""Overheard: menu bar application."""
 
 import os
 import subprocess
@@ -56,14 +56,20 @@ class TranscriberApp(rumps.App):
         super().__init__("Overheard", icon=icon, template=True, title="")
         self._state = "idle"
         self._recorder: Recorder | None = None
-        self._popover = None     # TransportPopover — built at startup
+        self._popover = None     # TransportPopover, built at startup
         self._prefs_window = None
         self._details_panel = None
         self._level_timer: rumps.Timer | None = None
         self._gather_poll_timer: rumps.Timer | None = None
+        self._live = None          # LiveTranscriber while recording
+        self._live_panel = None    # LiveTranscriptPanel
+        self._record_rate = SAMPLE_RATE   # native rate of the active recording
+        self._recorder_poll_timer: rumps.Timer | None = None
+        self._pending_recorder = None
+        self._pending_recorder_error = None
 
     # ------------------------------------------------------------------
-    # Menu items (minimal — main UI is the popover)
+    # Menu items (minimal; main UI is the popover)
     # ------------------------------------------------------------------
 
     @rumps.clicked("Open Transcripts")
@@ -90,39 +96,141 @@ class TranscriberApp(rumps.App):
         if self._state != "idle":
             return
 
+        # Give immediate visual feedback, then defer ALL CoreAudio work.
+        # find_recording_device() and Recorder() both call sd.query_devices()
+        # which touches CoreAudio. Running those synchronously inside mouseDown_
+        # caused C-level crashes in earlier builds. The timer fires on the main
+        # run-loop 50 ms later, well after AppKit has finished unwinding the
+        # click event, so UI calls inside the callback remain safe.
+        self._set_state("recording", "Starting...")
+
+        def _deferred_start(timer):
+            timer.stop()
+            # Starting capture can block: the tap helper waits on the system
+            # audio permission dialog the first time it runs. Do it off the main
+            # thread and collect the result from a poll timer, matching the
+            # pattern used by _on_stop.
+            self._pending_recorder = None
+            self._pending_recorder_error = None
+            threading.Thread(target=self._start_recorder_bg, daemon=True).start()
+            self._recorder_poll_timer = rumps.Timer(self._poll_recorder_started, 0.15)
+            self._recorder_poll_timer.start()
+
+        rumps.Timer(_deferred_start, 0.05).start()
+
+    def _make_recorder(self):
+        """Pick a capture backend.
+
+        Prefers Core Audio process taps, which need no BlackHole install, no
+        aggregate devices and no output rerouting. Falls back to the input
+        device recorder when taps are unavailable.
+        """
+        backend = cfg.get("capture_backend", "auto")
+
+        if backend in ("auto", "tap"):
+            from overheard.capture import TapRecorder, is_available
+            available, reason = is_available()
+            if available:
+                return TapRecorder()
+            if backend == "tap":
+                raise RuntimeError(f"Tap capture unavailable: {reason}")
+            print(f"Audio: tap capture unavailable ({reason}); using input device",
+                  file=sys.stderr)
+
         device_id = find_recording_device()
         if device_id is None:
-            rumps.notification(
-                "Overheard", "No audio device found",
-                f"Open Preferences to create an Aggregate Device named '{DEFAULT_DEVICE_NAME}'.",
+            raise RuntimeError(
+                f"No audio device found. Open Preferences to create an Aggregate "
+                f"Device named '{DEFAULT_DEVICE_NAME}'."
             )
+        return Recorder(device_id)
+
+    def _start_recorder_bg(self):
+        """Build and start the recorder off the main thread."""
+        try:
+            recorder = self._make_recorder()
+            recorder.start()
+            self._pending_recorder = recorder
+        except Exception as e:
+            import traceback
+            print(f"capture start failed:\n{traceback.format_exc()}", file=sys.stderr)
+            self._pending_recorder_error = str(e)
+
+    def _poll_recorder_started(self, timer):
+        """Main-thread timer: finish wiring up once the recorder is running."""
+        recorder = self._pending_recorder
+        error = self._pending_recorder_error
+        if recorder is None and error is None:
+            return  # still starting
+
+        timer.stop()
+        self._recorder_poll_timer = None
+        self._pending_recorder = None
+        self._pending_recorder_error = None
+
+        if error is not None:
+            rumps.notification("Overheard", "Could not start recording", error)
+            self._set_state("idle", error[:60])
             return
 
-        recorder = Recorder(device_id)
         self._recorder = recorder
+        self._record_rate = recorder.sample_rate
 
         if self._popover:
             self._popover.configure_channels(recorder._is_multichannel)
         self._set_state("recording", "Recording...")
         self._start_level_timer()
+        self._start_live(recorder)
 
-        # Defer stream start to the next run-loop cycle so AppKit finishes
-        # processing the current mouse event before CoreAudio begins firing
-        # its realtime callbacks.  A race between CoreAudio's realtime thread
-        # and AppKit's event unwinding caused intermittent C-level crashes when
-        # recorder.start() was called synchronously inside mouseDown_.
-        def _deferred_start(timer):
-            timer.stop()
+    # ------------------------------------------------------------------
+    # Live transcription
+    # ------------------------------------------------------------------
+
+    def _start_live(self, recorder):
+        """Begin live transcription if enabled, and show the transcript panel.
+
+        Failures here are non-fatal: live transcription is a convenience, and
+        the authoritative transcript is still produced after the meeting.
+        """
+        if not cfg.get("live_preview", True):
+            return
+        try:
+            from overheard.live import LiveTranscriber, is_available
+            if not is_available():
+                print("Live transcription unavailable: parakeet-mlx not installed",
+                      file=sys.stderr)
+                return
+
+            from overheard.live_panel import LiveTranscriptPanel
+            if self._live_panel is None:
+                self._live_panel = LiveTranscriptPanel()
+
+            live = LiveTranscriber(recorder.sample_rate, recorder._channels_info)
+            live.start()
+            recorder.set_tap(live.feed)
+            self._live = live
+
+            self._live_panel.bind(live)
+            self._live_panel.show()
+        except Exception:
+            import traceback
+            print(f"live transcription failed to start:\n{traceback.format_exc()}",
+                  file=sys.stderr)
+            self._live = None
+
+    def _stop_live(self):
+        """Stop live transcription, leaving the final text visible."""
+        if self._live is not None:
             try:
-                recorder.start()
+                self._live.stop()
             except Exception:
-                import traceback
-                print(f"stream start failed:\n{traceback.format_exc()}", file=sys.stderr)
-                self._recorder = None
-                self._set_state("idle", "Audio error")
-                self._stop_level_timer()
-
-        rumps.Timer(_deferred_start, 0.05).start()
+                pass
+            self._live = None
+        if self._live_panel is not None:
+            try:
+                self._live_panel.unbind()
+            except Exception:
+                pass
 
     def _on_pause(self):
         if self._state == "recording" and self._recorder:
@@ -136,9 +244,14 @@ class TranscriberApp(rumps.App):
 
         self._stop_level_timer()
 
+        # Detach the live tap before stopping so no further blocks are fed.
+        self._recorder.set_tap(None)
+
         # Stop recorder and grab audio on the calling thread (fast).
         audio, channels_info = self._recorder.stop()
+        record_rate = self._recorder.sample_rate
         self._recorder = None
+        self._stop_live()
 
         if audio is None or len(audio) == 0:
             self._set_state("idle", "Ready")
@@ -156,10 +269,14 @@ class TranscriberApp(rumps.App):
         def _gather():
             import soundfile as sf
             tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-            sf.write(tmp.name, audio, SAMPLE_RATE)
+            # Write at the rate the audio was actually captured at. The Recorder
+            # opens the device at its native rate (CoreAudio aggregates refuse
+            # rate conversion), so stamping a fixed 16 kHz header here mislabelled
+            # every recording and played it back at a third of its real speed.
+            sf.write(tmp.name, audio, record_rate)
             tmp.close()
 
-            # Calendar — isolated sub-thread with hard join timeout so a
+            # Calendar: isolated sub-thread with hard join timeout so a
             # TCC dialog or slow iCloud sync can never block the gather thread.
             _mi = [None]
             def _cal():
@@ -186,7 +303,7 @@ class TranscriberApp(rumps.App):
             cal_location = (meeting_info.location
                             if (meeting_info and meeting_info.location) else location)
 
-            # Write results — the main-thread poll timer will pick these up.
+            # Write results; the main-thread poll timer will pick these up.
             self._pending_channels_info = channels_info
             self._pending_wav = tmp.name
             self._pending_meeting_meta = (cal_name, source, cal_location, cal_attendees)
@@ -199,7 +316,7 @@ class TranscriberApp(rumps.App):
         self._gather_poll_timer.start()
 
     def _poll_gather_done(self, timer):
-        """Main-thread timer — fires until background gather completes."""
+        """Main-thread timer, fires until background gather completes."""
         if self._pending_meeting_meta is None or self._pending_wav is None:
             return  # not ready yet, wait for next tick
         timer.stop()
@@ -226,6 +343,7 @@ class TranscriberApp(rumps.App):
         from overheard import config as cfg
 
         tmp_path = getattr(self, "_pending_wav", None)
+        channels_info = getattr(self, "_pending_channels_info", None)
         if not tmp_path:
             return
 
@@ -248,6 +366,7 @@ class TranscriberApp(rumps.App):
                     status_callback=on_status,
                     meeting_details=details,
                     mic_speaker=mic_speaker,
+                    channels_info=channels_info,
                 )
                 self._set_state("idle", "Done \u2713")
                 subprocess.Popen(["afplay", "/System/Library/Sounds/Glass.aiff"])

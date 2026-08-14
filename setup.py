@@ -1,7 +1,7 @@
 """py2app build configuration for Overheard.app.
 
 Note: pyproject.toml must NOT be present in the working directory when this
-runs — setuptools auto-reads it and sets install_requires, which py2app 0.28+
+runs: setuptools auto-reads it and sets install_requires, which py2app 0.28+
 forbids. build_app.sh handles this by temporarily renaming pyproject.toml.
 """
 
@@ -21,11 +21,17 @@ OPTIONS = {
         "CFBundleIdentifier": "au.com.overmoro.overheard",
         "CFBundleVersion": "0.1.0",
         "CFBundleShortVersionString": "0.1.0",
-        # Menu bar app — no dock icon
+        # Menu bar app, so no dock icon
         "LSUIElement": True,
         # Microphone permission
         "NSMicrophoneUsageDescription": (
             "Overheard needs microphone access to record meetings."
+        ),
+        # System audio capture via Core Audio process taps (macOS 14.4+).
+        # Without this key the tap fails rather than prompting.
+        "NSAudioCaptureUsageDescription": (
+            "Overheard records the audio from your meeting so it can be "
+            "transcribed on this Mac."
         ),
         # Notification style
         "NSUserNotificationAlertStyle": "alert",
