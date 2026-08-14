@@ -68,3 +68,14 @@ def capture_available() -> tuple[bool, str]:
     if helper_path() is None:
         return False, "overheard-helper not built"
     return True, ""
+
+
+def diarization_models_present() -> bool:
+    """True when FluidAudio has already fetched its speaker models.
+
+    The helper downloads these on first use into Application Support. Checking
+    for them is what lets Preferences say whether a download is actually
+    pending, rather than asserting one always is.
+    """
+    models = Path.home() / "Library" / "Application Support" / "FluidAudio" / "Models"
+    return models.is_dir() and any(models.iterdir())

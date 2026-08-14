@@ -22,10 +22,38 @@ warnings.filterwarnings("ignore", message="torchcodec is not installed correctly
 PARAKEET_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
 WHISPER_MODEL = "large-v3"
 
+# WhisperX loads through faster-whisper, which caches under the CTranslate2
+# conversion rather than under the bare model size above.
+WHISPER_REPO = "Systran/faster-whisper-large-v3"
+
 # Parakeet handles long audio by chunking with overlap. Full attention over an
 # hour-long meeting would exhaust memory, so chunk unless told otherwise.
 CHUNK_DURATION = 300.0
 OVERLAP_DURATION = 15.0
+
+
+def is_model_cached(repo_id: str = PARAKEET_MODEL) -> bool:
+    """True when the Hugging Face cache already holds this model.
+
+    Preferences used to display a fixed "Downloads on first use", which said
+    the same thing whether or not the model was there. Reporting a state
+    nothing has inspected is worse than reporting none, because the user has no
+    way to tell it apart from a real answer.
+
+    The cache layout is Hugging Face's own: ``<cache>/hub/models--org--name``
+    with the real files under ``snapshots/<revision>/``. A bare directory is
+    not enough, since an interrupted download leaves one behind.
+    """
+    import os
+    from pathlib import Path
+
+    hf_home = os.environ.get("HF_HOME")
+    hub = Path(hf_home) / "hub" if hf_home else Path.home() / ".cache" / "huggingface" / "hub"
+    folder = hub / ("models--" + repo_id.replace("/", "--"))
+    snapshots = folder / "snapshots"
+    if not snapshots.is_dir():
+        return False
+    return any(any(rev.iterdir()) for rev in snapshots.iterdir() if rev.is_dir())
 
 
 def transcribe_parakeet(audio_path: str, status_callback=None) -> list[dict]:
