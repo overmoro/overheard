@@ -86,8 +86,26 @@ _ROW_BAR_Y = (_ROW_H - _M_H) // 2  # = 3  (8px bar centred in 14px row)
 # ---------------------------------------------------------------------------
 
 class _LevelBar(NSView):
-    def init(self):
-        self = objc.super(_LevelBar, self).init()
+    """A segmented level meter.
+
+    The defaults below are class attributes, and the initialiser overrides
+    ``initWithFrame_`` rather than ``init``, for the same reason: this view is
+    built with ``alloc().initWithFrame_(...)``, and ``initWithFrame:`` is
+    NSView's designated initialiser. An ``init`` override is simply never
+    reached down that path, so the instance attributes were never assigned.
+
+    The consequence was not a quiet default. ``drawRect_`` raised
+    AttributeError the first time the view was asked to draw, which happens
+    inside AppKit's drawing machinery, where an unhandled Python exception
+    aborts the process. Pressing Record unhid the system meter row, the row
+    drew for the first time, and Overheard died with SIGTRAP and no traceback.
+    """
+
+    _level = 0.0
+    _active = False
+
+    def initWithFrame_(self, frame):
+        self = objc.super(_LevelBar, self).initWithFrame_(frame)
         if self is None:
             return None
         self._level  = 0.0
@@ -247,10 +265,16 @@ class _PillButton(NSView):
 class _DragHeader(NSView):
     """Header view that drags the parent NSPanel when clicked and dragged."""
 
-    def init(self):
-        self = objc.super(_DragHeader, self).init()
+    # Same designated-initialiser trap as _LevelBar: this view is built with
+    # initWithFrame_, so an init override would never run.
+    _drag_start = None
+    _drag_event_loc = None
+
+    def initWithFrame_(self, frame):
+        self = objc.super(_DragHeader, self).initWithFrame_(frame)
         if self is None:
             return None
+        self._drag_start = None
         self._drag_event_loc = None
         return self
 
