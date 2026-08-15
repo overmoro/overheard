@@ -378,11 +378,13 @@ class TranscriberApp(rumps.App):
         self._gather_poll_timer = None
         meta = self._pending_meeting_meta
         cal_name, source, cal_location, cal_attendees = meta
-        # An rumps.Timer callback is an ObjC callback: an exception escaping
-        # here aborts the process below Python's own handlers, with no
-        # traceback. The recording is already on disk at this point, so
-        # reporting the failure and leaving it there beats taking the app down
-        # with the audio still unsaved to a transcript.
+        # Not here to stop an abort: rumps wraps its own Timer callbacks in
+        # try/except (rumps.py:730), so an exception escaping this one is
+        # caught. It is caught silently, into a traceback nobody running a
+        # bundled .app will ever see, and it leaves the status label sitting on
+        # whatever it last said. The recording is already on disk at this
+        # point, so the failure has to become a visible state and a message
+        # the user can act on rather than a line in a log they do not have.
         try:
             panel = self._ensure_details_panel()
             self._set_state(IDLE, "Fill in details...")

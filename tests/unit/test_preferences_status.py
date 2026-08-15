@@ -289,9 +289,12 @@ class TestTheDownloadSuccessPath:
     forever with a live button under it, which is the double click the latch
     exists to prevent.
 
-    Nothing failed when that landed, and nothing failed when it was fixed. The
-    ordering is asserted as an observable here, not as a line of code, so it
-    cannot silently swap back.
+    These run the worker on a REAL thread. An earlier version called
+    _do_download_models directly on the main thread, where _finish_download and
+    _queue_refresh both short-circuit to a direct call. Production only ever
+    reaches this method from threading.Thread, so those short-circuits are dead
+    in the app and the marshalled branches are the only ones that run: both
+    could be deleted outright with the whole suite green.
     """
 
     @pytest.fixture
@@ -303,8 +306,24 @@ class TestTheDownloadSuccessPath:
         monkeypatch.setattr(preferences.subprocess, "run", lambda *a, **k: Result())
         monkeypatch.setattr("overheard.helper.helper_path", lambda: None)
 
-        # Record whether the latch was still held when the refresh ran.
-        seen = {}
+        # Stand in for the run loop: record what the worker marshalled, in
+        # order, then perform it. Recording is what lets the ordering be
+        # asserted; performing is what lets the end state be asserted.
+        marshalled = []
+        real_perform = preferences._perform_on_main
+
+        def recording_perform(target, selector, argument):
+            marshalled.append(selector)
+            if selector == "releaseDownload:":
+                target.releaseDownload_(argument)
+            elif selector == "refreshStatusOnMain:":
+                target.refreshStatusOnMain_(argument)
+            else:
+                real_perform(target, selector, argument)
+
+        monkeypatch.setattr(preferences, "_perform_on_main", recording_perform)
+
+        seen = {"marshalled": marshalled}
         real_refresh = delegate.refresh_status
 
         def watched_refresh():
@@ -316,27 +335,56 @@ class TestTheDownloadSuccessPath:
         delegate._download_generation = 1
         return seen
 
+    def _run_on_a_worker(self, delegate):
+        """Exactly how downloadModels_ starts it, so the real branch runs."""
+        import threading
+
+        done = threading.Event()
+
+        def worker():
+            try:
+                delegate._do_download_models(1)
+            finally:
+                done.set()
+
+        threading.Thread(target=worker, daemon=True).start()
+        assert done.wait(timeout=10), "the download worker never finished"
+
     def test_the_label_ends_on_the_refreshed_state(self, delegate, download_ready):
-        """The whole reason _queue_refresh is called at the end of a download."""
-        delegate._do_download_models(1)
+        """The whole reason a refresh is queued at the end of a download."""
+        self._run_on_a_worker(delegate)
         assert delegate._deps_status.value == "✓ Installed", (
             "the pane kept its progress text after a successful download, so "
             "the user sees 'Downloading...' with a live button under it"
         )
 
+    def test_the_worker_marshals_both_steps_in_order(self, delegate, download_ready):
+        """The production branch, and the ordering, as one assertion.
+
+        Deleting either _perform_on_main call leaves this empty or short.
+        """
+        self._run_on_a_worker(delegate)
+        # The worker also marshals every label write, so filter to the two
+        # steps under test rather than asserting on the whole trace.
+        steps = [s for s in download_ready["marshalled"]
+                 if s in ("releaseDownload:", "refreshStatusOnMain:")]
+        assert steps == ["releaseDownload:", "refreshStatusOnMain:"], (
+            "the worker did not marshal both steps to the main thread in the "
+            f"required order, it marshalled {steps}"
+        )
+
     def test_the_latch_is_released_before_the_refresh_runs(self, delegate, download_ready):
-        """The ordering, as a property rather than as a line number.
+        """The ordering as an observable, not as a line number.
 
         refresh_status is a no-op on this label while the latch is held, so
-        releasing afterwards makes the refresh pointless. Asserting what
-        refresh_status observed is what makes a reordering fail.
+        releasing afterwards makes the refresh pointless.
         """
-        delegate._do_download_models(1)
+        self._run_on_a_worker(delegate)
         assert download_ready.get("downloading_during_refresh") is False, (
             "refresh_status ran while the download latch was still held, so it "
             "skipped the dependency label it was called to update"
         )
 
     def test_the_latch_is_clear_at_the_end(self, delegate, download_ready):
-        delegate._do_download_models(1)
+        self._run_on_a_worker(delegate)
         assert delegate._downloading is False

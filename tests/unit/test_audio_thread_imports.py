@@ -208,12 +208,38 @@ def test_the_registered_tap_callback_imports_nothing():
 
 
 def test_the_live_diarizer_feed_imports_nothing():
-    """The other branch inside feed, which runs on a default install.
+    """The real LiveDiarizer.feed, not a stand-in for it.
 
-    live_speakers defaults True, so on most recordings feed also calls
-    self.diarizer.feed(chunk) on the capture thread. The fixture above sets
-    diarizer to None, so that call was outside every guarded window and a lazy
-    import inside it was invisible to this whole file.
+    live_speakers defaults True, so LiveTranscriber.feed calls
+    self.diarizer.feed(chunk) on the capture thread for most recordings. An
+    earlier version of this test substituted a stub whose body was one append,
+    which cannot import anything by construction: the assertion was a property
+    of the stub, and a first-time import at the top of the real feed left the
+    whole suite green.
+
+    Only _proc and _outbox are needed, and neither starts a subprocess.
+    """
+    diarizer = live.LiveDiarizer.__new__(live.LiveDiarizer)
+    diarizer._proc = object()          # non-None, so feed does not early-return
+    diarizer._outbox = queue.Queue(maxsize=4)
+
+    chunk = np.zeros(16000, dtype=np.float32)
+    with NoImportsAllowed() as guard:
+        diarizer.feed(chunk)
+
+    assert guard.attempted == [], (
+        f"first-time imports inside LiveDiarizer.feed: {guard.attempted}"
+    )
+    assert not diarizer._outbox.empty(), (
+        "feed() early-returned, so nothing inside it was actually exercised"
+    )
+
+
+def test_the_transcriber_reaches_the_diarizer_on_the_capture_thread():
+    """The wiring, kept separate from the import assertion above.
+
+    A stub is the right tool for proving the branch is reached; it is the wrong
+    tool for proving the branch imports nothing.
     """
     transcriber = _a_transcriber()
 
@@ -226,35 +252,9 @@ def test_the_live_diarizer_feed_imports_nothing():
             received.append(chunk)
 
     transcriber.diarizer = StubDiarizer()
+    transcriber.feed(np.zeros((48000 + 4800, 2), dtype=np.float32))
 
-    block = np.zeros((48000 + 4800, 2), dtype=np.float32)
-    with NoImportsAllowed() as guard:
-        transcriber.feed(block)
-
-    assert guard.attempted == [], (
-        f"first-time imports on the live diarizer path: {guard.attempted}"
-    )
-    assert received, "the diarizer branch never ran, so it is not covered"
-
-
-def test_the_transcriber_stand_in_can_actually_feed(capsys):
-    """The stand-in has to be complete, or every test using it is vacuous.
-
-    Deliberately ordered AFTER the guarded test above. It calls feed() without
-    the guard installed, so running it first would warm any module the guarded
-    test is about to watch for, and hide a real violation.
-
-    feed() catches everything and prints, so an incomplete stand-in fails
-    silently and takes the assertions with it. This checks the stderr channel
-    that swallowing writes to.
-    """
-    transcriber = _a_transcriber()
-    transcriber.feed(np.zeros((4800, 2), dtype=np.float32))
-    err = capsys.readouterr().err
-    assert "live feed error" not in err, (
-        f"feed() swallowed an exception, so the stand-in is incomplete: {err}"
-    )
-    assert len(transcriber._pending) == 1600
+    assert received, "LiveTranscriber.feed never reached the diarizer"
 
 
 def test_a_swallowed_import_is_still_recorded(warm_package):

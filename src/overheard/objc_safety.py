@@ -73,6 +73,14 @@ def objc_safe_returning(fallback):
                 except Exception as e:
                     _report(method, e)
                     return fallback
+        elif argcount == 3:                     # (self, table, row)
+            @functools.wraps(method)
+            def wrapper(self, a, b):
+                try:
+                    return method(self, a, b)
+                except Exception as e:
+                    _report(method, e)
+                    return fallback
         elif argcount == 4:                     # (self, table, column, row)
             @functools.wraps(method)
             def wrapper(self, a, b, c):

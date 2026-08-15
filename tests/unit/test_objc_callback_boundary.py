@@ -182,8 +182,19 @@ class TestFirstPartyObjCMethodsAreGuarded:
         excluded. Anything new fails until somebody classifies it, which is the
         only shape that closes an open set.
         """
+        import importlib
         import inspect
-        from overheard import details_panel, live_panel, popover, preferences
+        import pkgutil
+
+        import overheard
+
+        # Derived, not listed. A hand-written module tuple closes the set of
+        # classes and leaves the set of modules open: a new file with an
+        # AppKit delegate in it was invisible, which is the same open-set hole
+        # this test was rewritten to remove, one level up.
+        modules = []
+        for info in pkgutil.iter_modules(overheard.__path__):
+            modules.append(importlib.import_module(f"overheard.{info.name}"))
 
         # Excluded, each for a stated reason:
         #   init*        must return self, and a guard returning None on
@@ -214,7 +225,7 @@ class TestFirstPartyObjCMethodsAreGuarded:
         }
 
         unaccounted = []
-        for module in (popover, preferences, details_panel, live_panel):
+        for module in modules:
             for _, cls in inspect.getmembers(module, inspect.isclass):
                 if cls.__module__ != module.__name__:
                     continue
