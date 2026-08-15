@@ -193,17 +193,18 @@ class TestFirstPartyObjCMethodsAreGuarded:
         #   accepts*     must return a bool; None reads as False and would
         #                silently change responder behaviour. Bodies are a
         #                single `return True` and cannot raise.
-        #   numberOfRows/tableView_*  guarded separately below, because they
-        #                must return typed values rather than None.
+        #   (The three NSTableView data source methods are NOT excluded. They
+        #    are AppKit-dispatched and now carry objc_safe_returning, which
+        #    hands back a typed fallback instead of None. An earlier version
+        #    excluded them with the reason "guarded separately below", and
+        #    there was nothing below: a false reason inside the one mechanism
+        #    whose whole value is that its reasons are true.)
         EXCLUDED = {
             "initWithFrame_", "initWithCallbacks_", "initWithWindow_",
             "initWithPanel_", "initWithIcon_label_color_callback_",
             "initWithCallback_discardCallback_", "init",
             "setLevel_", "setActive_", "setEnabled_", "setRows_", "names",
             "acceptsFirstResponder", "acceptsFirstMouse_",
-            "numberOfRowsInTableView_",
-            "tableView_objectValueForTableColumn_row_",
-            "tableView_setObjectValue_forTableColumn_row_",
             # PyObjC injects this on every NSObject subclass. Not ours.
             "bundleForClass",
             # Not dispatched: reached only through refreshStatusOnMain_, which

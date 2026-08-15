@@ -22,7 +22,7 @@ from AppKit import (
 )
 from Foundation import NSObject
 
-from overheard.objc_safety import objc_safe
+from overheard.objc_safety import objc_safe, objc_safe_returning
 from typing import Any
 
 try:
@@ -107,9 +107,11 @@ class _AttendeeDataSource(NSObject):
     def setRows_(self, rows: list[list[str]]) -> None:
         self._rows = rows
 
+    @objc_safe_returning(0)
     def numberOfRowsInTableView_(self, table_view) -> int:
         return len(self._rows)
 
+    @objc_safe_returning("")
     def tableView_objectValueForTableColumn_row_(self, table_view, column, row):
         if row >= len(self._rows):
             return ""
@@ -120,6 +122,7 @@ class _AttendeeDataSource(NSObject):
             return self._rows[row][1]
         return ""
 
+    @objc_safe_returning(None)
     def tableView_setObjectValue_forTableColumn_row_(self, table_view, value, column, row):
         if row >= len(self._rows):
             return

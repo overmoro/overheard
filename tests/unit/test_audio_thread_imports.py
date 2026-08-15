@@ -197,6 +197,44 @@ def test_the_registered_tap_callback_imports_nothing():
     assert not transcriber._queue.empty(), (
         "feed() did not reach _enqueue, so a lazy import there is invisible"
     )
+    # _record_energy has early returns on channels_info, so without this its
+    # coverage is a property of the fixture rather than of any assertion: a
+    # later edit setting channels_info to None would silently stop exercising
+    # it while this test stayed green.
+    assert transcriber._bucket_index, (
+        "feed() did not reach _record_energy, so a lazy import there is invisible"
+    )
+    assert transcriber._energy, "no energy was recorded"
+
+
+def test_the_live_diarizer_feed_imports_nothing():
+    """The other branch inside feed, which runs on a default install.
+
+    live_speakers defaults True, so on most recordings feed also calls
+    self.diarizer.feed(chunk) on the capture thread. The fixture above sets
+    diarizer to None, so that call was outside every guarded window and a lazy
+    import inside it was invisible to this whole file.
+    """
+    transcriber = _a_transcriber()
+
+    received = []
+
+    class StubDiarizer:
+        available = True
+
+        def feed(self, chunk):
+            received.append(chunk)
+
+    transcriber.diarizer = StubDiarizer()
+
+    block = np.zeros((48000 + 4800, 2), dtype=np.float32)
+    with NoImportsAllowed() as guard:
+        transcriber.feed(block)
+
+    assert guard.attempted == [], (
+        f"first-time imports on the live diarizer path: {guard.attempted}"
+    )
+    assert received, "the diarizer branch never ran, so it is not covered"
 
 
 def test_the_transcriber_stand_in_can_actually_feed(capsys):

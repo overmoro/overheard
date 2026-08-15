@@ -178,6 +178,36 @@ class TestMalformedSegmentsDoNotCostTheTranscript:
         result = diarization._diarize_fluidaudio("meeting.wav")
         assert [t["speaker"] for t in result] == ["SPEAKER_00", "SPEAKER_02"]
 
-    def test_a_segments_key_that_is_not_a_list_does_not_raise(self, helper_returning):
-        helper_returning({"segments": "unexpected"})
-        assert diarization._diarize_fluidaudio("meeting.wav") in ([], None)
+    @pytest.mark.parametrize("payload, why", [
+        pytest.param({"segments": None}, "a Swift Encodable optional array emits null",
+                     id="segments-null"),
+        pytest.param([], "the helper emitted a bare array", id="payload-list"),
+        pytest.param(None, "the helper emitted null", id="payload-null"),
+        pytest.param("ok", "the helper emitted a bare string", id="payload-string"),
+        pytest.param({"segments": 5}, "segments is not a sequence", id="segments-int"),
+        pytest.param({"segments": [None, "x", 3]}, "the segments are not objects",
+                     id="segments-not-objects"),
+    ])
+    def test_malformed_payloads_read_as_unavailable(self, helper_returning, payload, why):
+        """Well-formed JSON is not well-formed output.
+
+        `.get`'s default fires only when a key is ABSENT, not when it is null,
+        and a bare list, null or string payload has no `.get` at all. Each of
+        these raised past diarize() and out of transcribe_audio, whose caller
+        deletes the temp WAV, so the diarizer destroyed a meeting it had
+        already transcribed.
+        """
+        helper_returning(payload)
+        result = diarization._diarize_fluidaudio("meeting.wav")
+        assert result is None or result == [], f"{why}: got {result!r}"
+
+    def test_a_string_payload_is_unavailable_not_empty(self, helper_returning):
+        """Discriminates the guard from the pre-fix accident.
+
+        Before the guard, iterating a string yielded characters that the inner
+        handler skipped one by one, so the function returned [] and an
+        `in ([], None)` assertion passed either way. None is the honest answer:
+        the backend could not be read.
+        """
+        helper_returning("unexpected")
+        assert diarization._diarize_fluidaudio("meeting.wav") is None

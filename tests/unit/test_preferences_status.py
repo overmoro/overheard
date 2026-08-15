@@ -277,3 +277,66 @@ class TestTheLatchGeneration:
         delegate._download_generation = 2
         delegate.releaseDownload_(2)
         assert delegate._downloading is False
+
+
+class TestTheDownloadSuccessPath:
+    """The path that had no test, and so acquired a regression unnoticed.
+
+    A fix consolidating the latch release into a single `finally` put it after
+    the refresh. refresh_status skips the dependency label while the latch is
+    set, so the refresh did nothing and the release then cleared the latch
+    behind it: after a fully successful download the pane read "Downloading..."
+    forever with a live button under it, which is the double click the latch
+    exists to prevent.
+
+    Nothing failed when that landed, and nothing failed when it was fixed. The
+    ordering is asserted as an observable here, not as a line of code, so it
+    cannot silently swap back.
+    """
+
+    @pytest.fixture
+    def download_ready(self, delegate, monkeypatch):
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        monkeypatch.setattr(preferences.subprocess, "run", lambda *a, **k: Result())
+        monkeypatch.setattr("overheard.helper.helper_path", lambda: None)
+
+        # Record whether the latch was still held when the refresh ran.
+        seen = {}
+        real_refresh = delegate.refresh_status
+
+        def watched_refresh():
+            seen["downloading_during_refresh"] = delegate._downloading
+            return real_refresh()
+
+        monkeypatch.setattr(delegate, "refresh_status", watched_refresh)
+        delegate._downloading = True
+        delegate._download_generation = 1
+        return seen
+
+    def test_the_label_ends_on_the_refreshed_state(self, delegate, download_ready):
+        """The whole reason _queue_refresh is called at the end of a download."""
+        delegate._do_download_models(1)
+        assert delegate._deps_status.value == "✓ Installed", (
+            "the pane kept its progress text after a successful download, so "
+            "the user sees 'Downloading...' with a live button under it"
+        )
+
+    def test_the_latch_is_released_before_the_refresh_runs(self, delegate, download_ready):
+        """The ordering, as a property rather than as a line number.
+
+        refresh_status is a no-op on this label while the latch is held, so
+        releasing afterwards makes the refresh pointless. Asserting what
+        refresh_status observed is what makes a reordering fail.
+        """
+        delegate._do_download_models(1)
+        assert download_ready.get("downloading_during_refresh") is False, (
+            "refresh_status ran while the download latch was still held, so it "
+            "skipped the dependency label it was called to update"
+        )
+
+    def test_the_latch_is_clear_at_the_end(self, delegate, download_ready):
+        delegate._do_download_models(1)
+        assert delegate._downloading is False

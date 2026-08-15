@@ -51,6 +51,60 @@ def objc_safe(method):
     return wrapper
 
 
+def objc_safe_returning(fallback):
+    """objc_safe for methods AppKit expects a value back from.
+
+    A data source cannot use ``objc_safe``: returning None where AppKit asked
+    for a row count is not a safe degradation, it is a different crash. These
+    return a caller-supplied value of the right type instead, so a failure
+    shows an empty table rather than taking the process down.
+
+    Arity is spelled per shape for the same reason as above, so PyObjC still
+    builds the right selector.
+    """
+    def decorate(method):
+        argcount = method.__code__.co_argcount
+
+        if argcount == 2:                       # (self, arg)
+            @functools.wraps(method)
+            def wrapper(self, a):
+                try:
+                    return method(self, a)
+                except Exception as e:
+                    _report(method, e)
+                    return fallback
+        elif argcount == 4:                     # (self, table, column, row)
+            @functools.wraps(method)
+            def wrapper(self, a, b, c):
+                try:
+                    return method(self, a, b, c)
+                except Exception as e:
+                    _report(method, e)
+                    return fallback
+        elif argcount == 5:                     # (self, table, value, column, row)
+            @functools.wraps(method)
+            def wrapper(self, a, b, c, d):
+                try:
+                    return method(self, a, b, c, d)
+                except Exception as e:
+                    _report(method, e)
+                    return fallback
+        else:
+            raise TypeError(
+                f"objc_safe_returning has no wrapper for {method.__qualname__} "
+                f"with {argcount} arguments. Add one rather than widening to "
+                "*args: PyObjC derives the selector from the argument count."
+            )
+        return wrapper
+
+    return decorate
+
+
+def _report(method, exc) -> None:
+    print(f"[overheard] {method.__qualname__} failed: {exc}", file=sys.stderr)
+    traceback.print_exc()
+
+
 def objc_safe_noarg(method):
     """objc_safe for the zero-argument shape, such as updateTrackingAreas."""
     @functools.wraps(method)
