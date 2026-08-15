@@ -56,6 +56,47 @@ class TestIsModelCached:
         _install(hf_cache, "meta-llama/Llama-3.1-8B-Instruct")
         assert asr.is_model_cached("mlx-community/parakeet-tdt-0.6b-v3") is False
 
+    def test_a_snapshot_with_no_files_reports_missing(self, hf_cache):
+        """Blobs on disk with nothing linking to them.
+
+        Found on this machine rather than imagined: a cache held a complete
+        483 MB weights blob under a revision directory containing no symlinks
+        at all. huggingface_hub resolves a model through snapshots/<rev>/, so
+        that model could not be loaded and the disk cost was real. Checking
+        inside the revision rather than anywhere under the model folder is what
+        makes that read as absent, which is the truth.
+        """
+        repo = "mlx-community/parakeet-tdt-0.6b-v3"
+        folder = hf_cache / ("models--" + repo.replace("/", "--"))
+        (folder / "snapshots" / "abc123").mkdir(parents=True)
+        blobs = folder / "blobs"
+        blobs.mkdir()
+        (blobs / "deadbeef").write_bytes(b"\x00" * 4096)
+        assert asr.is_model_cached(repo) is False
+
+    def test_a_dangling_weights_symlink_reports_missing(self, hf_cache):
+        """The real cache stores one blob and symlinks to it from the snapshot.
+
+        A garbage-collected or never-finished blob leaves the link pointing at
+        nothing. Path.exists() follows the link, so it answers "is the file
+        really there", which is why the guard is written that way. Without it
+        the stat() below raises FileNotFoundError out of _model_status.
+        """
+        repo = "mlx-community/parakeet-tdt-0.6b-v3"
+        snapshot = _install(hf_cache, repo)
+        weights = snapshot / "model.safetensors"
+        weights.unlink()
+        weights.symlink_to(hf_cache / "blobs" / "never-finished")
+        assert weights.is_symlink()
+        assert asr.is_model_cached(repo) is False
+
+    def test_zero_byte_weights_report_missing(self, hf_cache):
+        """A file created and never written is not a model."""
+        repo = "mlx-community/parakeet-tdt-0.6b-v3"
+        snapshot = _install(hf_cache, repo)
+        (snapshot / "model.safetensors").write_bytes(b"")
+        assert asr.is_model_cached(repo) is False
+
     def test_the_parakeet_constant_is_a_repo_id(self):
         """A bare model size would never match a cache folder, so it must be a repo.
 
