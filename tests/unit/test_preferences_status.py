@@ -1,0 +1,155 @@
+"""The Preferences panes must report what is true now, not at first open.
+
+The window is built once and reused, so anything computed during ``_build`` is
+a reading from the first time Preferences was ever opened. Models get
+downloaded, aggregate devices get created and deleted in Audio MIDI Setup, and
+voices are added to the library by every transcription, so three labels were
+reporting state that had since moved.
+
+Nothing in this file needs a window server. The delegate is a real NSObject and
+the labels are stand-ins that record what was written to them, which is enough
+to pin who writes what and when.
+"""
+
+import pytest
+
+from overheard import preferences
+
+
+class FakeLabel:
+    """Stands in for an NSTextField, recording writes.
+
+    Implements performSelectorOnMainThread_withObject_waitUntilDone_ because
+    that is how the production code writes to a label from a worker thread.
+    Recording it separately is what lets a test assert the marshalling happened
+    rather than assuming it.
+    """
+
+    def __init__(self):
+        self.value = ""
+        self.direct_writes = 0
+        self.marshalled_writes = 0
+
+    def setStringValue_(self, text):
+        self.value = text
+        self.direct_writes += 1
+
+    def performSelectorOnMainThread_withObject_waitUntilDone_(self, sel, obj, wait):
+        assert sel == "setStringValue:", f"unexpected selector {sel!r}"
+        self.value = obj
+        self.marshalled_writes += 1
+
+
+@pytest.fixture
+def delegate(monkeypatch):
+    """A real delegate with stand-in widgets and no filesystem underneath."""
+    d = preferences._PreferencesDelegate.alloc().initWithWindow_(None)
+    d._deps_status = FakeLabel()
+    d._aggregate_status = FakeLabel()
+    d._multiout_status = FakeLabel()
+
+    monkeypatch.setattr(preferences, "_model_status", lambda: "✓ Installed")
+    monkeypatch.setattr(preferences, "_device_exists", lambda name: f"✓ {name}")
+    monkeypatch.setattr(d, "_refresh_speakers", lambda: None)
+    return d
+
+
+class TestRefreshStatus:
+    def test_it_recomputes_the_labels_that_can_go_stale(self, delegate):
+        """All three read state outside the window and were build-time only."""
+        delegate.refresh_status()
+        assert delegate._deps_status.value == "✓ Installed"
+        assert delegate._aggregate_status.value == "✓ Meeting Capture"
+        assert delegate._multiout_status.value == "✓ Meeting Monitor"
+
+    def test_it_reloads_the_known_voices(self, delegate, monkeypatch):
+        """The speaker list is written by every transcription, not just by _build."""
+        called = []
+        monkeypatch.setattr(delegate, "_refresh_speakers", lambda: called.append(True))
+        delegate.refresh_status()
+        assert called, "the known-voices popup was not reloaded"
+
+    def test_a_second_open_sees_a_model_that_arrived_in_between(self, delegate, monkeypatch):
+        """The defect in one test: install a model between two opens."""
+        installed = {"yes": False}
+        monkeypatch.setattr(
+            preferences, "_model_status",
+            lambda: "✓ Installed" if installed["yes"] else "Missing: transcription models",
+        )
+        delegate.refresh_status()
+        assert delegate._deps_status.value.startswith("Missing")
+        installed["yes"] = True
+        delegate.refresh_status()
+        assert delegate._deps_status.value == "✓ Installed"
+
+    def test_it_does_not_raise_when_reading_the_cache_fails(self, delegate, monkeypatch):
+        """This runs from the gear button, where an escaping exception aborts.
+
+        _model_status walks the Hugging Face cache and _device_exists queries
+        Core Audio. Either can raise OSError, and unwinding out of an AppKit
+        action callback kills the process with no crash report, which is worse
+        than a stale label.
+        """
+        def boom():
+            raise OSError("cache directory unreadable")
+        monkeypatch.setattr(preferences, "_model_status", boom)
+
+        delegate.refresh_status()   # must not raise
+
+        assert "unavailable" in delegate._deps_status.value, (
+            "a failed refresh must say so on the pane, not leave it blank"
+        )
+
+
+class TestDownloadLatch:
+    def test_a_second_click_while_downloading_starts_nothing(self, delegate, monkeypatch):
+        """Two clicks used to mean two 30 minute subprocesses on one cache."""
+        started = []
+        monkeypatch.setattr(
+            preferences.threading, "Thread",
+            lambda *a, **k: type("T", (), {"start": lambda s: started.append(True)})(),
+        )
+        delegate.downloadModels_(None)
+        delegate.downloadModels_(None)
+        assert len(started) == 1, f"expected one download thread, started {len(started)}"
+
+    def test_a_download_in_flight_keeps_its_own_label(self, delegate):
+        """refresh_status must not report Missing over a running download.
+
+        Opening Preferences while a download runs used to overwrite the
+        progress text with a state read from a cache the download had not
+        finished writing, so the UI said nothing was happening and invited a
+        second click.
+        """
+        delegate._downloading = True
+        delegate._deps_status.value = "Downloading Parakeet TDT v3..."
+        delegate.refresh_status()
+        assert delegate._deps_status.value == "Downloading Parakeet TDT v3..."
+
+    def test_the_latch_clears_so_a_failed_download_can_be_retried(self, delegate, monkeypatch):
+        """A latch that survives a failure is a button that never works again."""
+        def explode():
+            raise RuntimeError("network gone")
+        monkeypatch.setattr(preferences.subprocess, "run", lambda *a, **k: explode())
+
+        delegate._downloading = True
+        delegate._do_download_models()
+        assert delegate._downloading is False
+
+
+class TestThreadSafety:
+    def test_worker_label_writes_are_marshalled_to_the_main_thread(self, delegate):
+        """Mutating an NSTextField off the main thread is undefined behaviour.
+
+        The workers run on daemon threads, and this app has already died once
+        from an exception crossing the ObjC boundary with no crash report.
+        """
+        preferences._set_label(delegate._deps_status, "from a worker")
+        assert delegate._deps_status.marshalled_writes == 1
+        assert delegate._deps_status.direct_writes == 0
+
+    def test_the_worker_can_ask_for_a_refresh_on_the_main_thread(self, delegate):
+        """The selector has to exist, or the request is silently a no-op."""
+        assert delegate.respondsToSelector_("refreshStatusOnMain:"), (
+            "the download worker calls this selector by name when it finishes"
+        )

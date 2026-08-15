@@ -6,6 +6,7 @@ Sections: General, Audio, Transcription, Output, Integrations.
 
 import os
 import subprocess
+import sys
 import threading
 
 import objc
@@ -106,6 +107,19 @@ def _make_text_field(x: float, y: float, w: float, h: float,
 # Delegate: NSObject subclass handles all button actions
 # ---------------------------------------------------------------------------
 
+def _set_label(label, text: str) -> None:
+    """Write to an AppKit label from any thread.
+
+    The download and device-creation workers run on daemon threads. Mutating an
+    NSTextField from one is undefined behaviour, and this app has already died
+    once from an exception crossing the ObjC boundary with no crash report, so
+    the write is handed to the main thread rather than done in place.
+    """
+    label.performSelectorOnMainThread_withObject_waitUntilDone_(
+        "setStringValue:", text, False
+    )
+
+
 class _PreferencesDelegate(NSObject):
 
     def initWithWindow_(self, window):
@@ -113,6 +127,10 @@ class _PreferencesDelegate(NSObject):
         if self is None:
             return None
         self._window = window
+        # A download owns the dependency label while it runs. Declared here so
+        # every path can read it without a getattr default standing in for an
+        # invariant that is supposed to hold.
+        self._downloading = False
         return self
 
     # ---- General -----------------------------------------------------------
@@ -136,7 +154,7 @@ class _PreferencesDelegate(NSObject):
 
     def _do_create_aggregate(self):
         ok, msg = create_aggregate_device()
-        self._aggregate_status.setStringValue_(f"{'✓' if ok else '✗'} {msg}")
+        _set_label(self._aggregate_status, f"{'✓' if ok else '✗'} {msg}")
 
     def createMonitoringDevice_(self, sender):
         self._multiout_status.setStringValue_("Creating...")
@@ -144,29 +162,64 @@ class _PreferencesDelegate(NSObject):
 
     def _do_create_multiout(self):
         ok, msg = create_multi_output_device()
-        self._multiout_status.setStringValue_(f"{'✓' if ok else '✗'} {msg}")
+        _set_label(self._multiout_status, f"{'✓' if ok else '✗'} {msg}")
 
     # ---- Engine ------------------------------------------------------------
 
-    def refresh_status(self) -> None:
-        """Recompute every label describing state outside this window.
+    def refreshStatusOnMain_(self, _ignored):
+        """ObjC entry point so a worker thread can request a refresh.
 
-        Called on open and after anything that changes what they report, so the
-        window never shows a reading taken earlier in the session.
+        refresh_status touches several widgets, not just text fields, so the
+        whole method is marshalled rather than each write inside it.
         """
-        status = getattr(self, "_deps_status", None)
-        if status is not None:
-            status.setStringValue_(_model_status())
+        self.refresh_status()
 
-        capture = getattr(self, "_capture_status", None)
-        if capture is not None:
-            from overheard.capture import is_available as _tap_available
-            ok, why = _tap_available()
-            capture.setStringValue_(
-                "Capturing through Core Audio process taps. No extra devices needed."
-                if ok else
-                f"Process taps unavailable ({why}). The fallback below needs BlackHole."
+    def refresh_status(self) -> None:
+        """Recompute the labels that read state from outside this window.
+
+        Called on open and after a download, so the window never shows a
+        reading taken earlier in the session.
+
+        Not everything on the panes is recomputed, and which is which matters.
+        The capture-backend label derives from sys.platform, the macOS version
+        and whether the helper binary exists, none of which change while the
+        process runs, so _build writes it once and it is correct forever. The
+        three below genuinely move underneath us: models get downloaded,
+        aggregate devices get created and deleted in Audio MIDI Setup, and
+        voices are added to the library by every transcription. Each was
+        written only during _build, so opening Preferences a second time
+        reported the state as it was the first time.
+
+        The body is guarded because this runs from the gear button's action
+        callback, and _model_status walks the Hugging Face cache while
+        _device_exists queries Core Audio. An OSError from either would escape
+        into AppKit's dispatch and abort the process without a traceback,
+        which is a worse outcome than a stale label.
+        """
+        try:
+            if self._downloading:
+                # A running download owns this label and publishes its own
+                # progress. Overwriting it would report "Missing" over a live
+                # download and invite the user to start a second one.
+                pass
+            else:
+                _set_label(self._deps_status, _model_status())
+
+            _set_label(self._aggregate_status, _device_exists("Meeting Capture"))
+            _set_label(self._multiout_status, _device_exists("Meeting Monitor"))
+            self._refresh_speakers()
+        except Exception as e:
+            print(
+                f"[overheard] could not refresh the Preferences status: {e}",
+                file=sys.stderr,
             )
+            # Say so on the pane rather than leaving whatever was there. These
+            # labels are the only writer now, so silence would read as a
+            # deliberate blank rather than as a failure.
+            try:
+                _set_label(self._deps_status, "Status unavailable, see the log")
+            except Exception:
+                pass
 
     def toggleLivePreview_(self, sender):
         cfg.set_value("live_preview", bool(sender.state()))
@@ -207,12 +260,23 @@ class _PreferencesDelegate(NSObject):
     # ---- Dependencies ------------------------------------------------------
 
     def downloadModels_(self, sender):
+        """Start a download, unless one is already running.
+
+        Without the latch every click spawned another daemon thread, so a user
+        who clicked twice ran two 30 minute subprocesses writing into the same
+        Hugging Face cache. Clicking twice is the natural response to a button
+        that appears to have done nothing, which is exactly what a multi
+        gigabyte download looks like for its first minute.
+        """
+        if self._downloading:
+            return
+        self._downloading = True
         self._deps_status.setStringValue_("Downloading... (this may take several minutes)")
         threading.Thread(target=self._do_download_models, daemon=True).start()
 
     def _do_download_models(self):
         try:
-            self._deps_status.setStringValue_("Downloading Parakeet TDT v3...")
+            _set_label(self._deps_status, "Downloading Parakeet TDT v3...")
             from overheard.asr import PARAKEET_MODEL
             code = ("from parakeet_mlx import from_pretrained; "
                     f"from_pretrained({PARAKEET_MODEL!r})")
@@ -223,8 +287,8 @@ class _PreferencesDelegate(NSObject):
                 capture_output=True, text=True, timeout=1800,
             )
             if result.returncode != 0:
-                self._deps_status.setStringValue_(
-                    f"✗ {label} failed: {result.stderr[:120]}"
+                _set_label(
+                    self._deps_status, f"✗ {label} failed: {result.stderr[:120]}"
                 )
                 return
 
@@ -233,22 +297,32 @@ class _PreferencesDelegate(NSObject):
             from overheard.helper import helper_path
             binary = helper_path()
             if binary is not None:
-                self._deps_status.setStringValue_("Downloading speaker models...")
+                _set_label(self._deps_status, "Downloading speaker models...")
                 result = subprocess.run(
                     [str(binary), "download"],
                     capture_output=True, text=True, timeout=1800,
                 )
                 if result.returncode != 0:
-                    self._deps_status.setStringValue_(
-                        f"✓ {label} done  ✗ Speaker models: {result.stderr[:80]}"
+                    _set_label(
+                        self._deps_status,
+                        f"✓ {label} done  ✗ Speaker models: {result.stderr[:80]}",
                     )
                     return
 
-            self.refresh_status()
+            # Cleared before the refresh, so refresh_status is free to write
+            # the finished state rather than skipping the label it owns.
+            self._downloading = False
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "refreshStatusOnMain:", None, False
+            )
         except subprocess.TimeoutExpired:
-            self._deps_status.setStringValue_("✗ Download timed out")
+            _set_label(self._deps_status, "✗ Download timed out")
         except Exception as e:
-            self._deps_status.setStringValue_(f"✗ {e}")
+            _set_label(self._deps_status, f"✗ {e}")
+        finally:
+            # Every early return above leaves the latch set otherwise, and a
+            # download that failed must not block the retry.
+            self._downloading = False
 
     # ---- Output Folder -----------------------------------------------------
 
@@ -485,8 +559,9 @@ class PreferencesWindow:
         btn_agg = _make_button("Create Recording Device", 20, y, 210, 28,
                                "createRecordingDevice:", self._delegate)
         pane.addSubview_(btn_agg)
+        # Left empty: refresh_status is the single writer, and show() calls
+        # it immediately after this, so nothing is ever painted blank.
         self._delegate._aggregate_status = _make_status(238, y + 5, PW - 220)
-        self._delegate._aggregate_status.setStringValue_(_device_exists("Meeting Capture"))
         pane.addSubview_(self._delegate._aggregate_status)
         y -= 36
 
@@ -494,7 +569,6 @@ class PreferencesWindow:
                               "createMonitoringDevice:", self._delegate)
         pane.addSubview_(btn_mo)
         self._delegate._multiout_status = _make_status(238, y + 5, PW - 220)
-        self._delegate._multiout_status.setStringValue_(_device_exists("Meeting Monitor"))
         pane.addSubview_(self._delegate._multiout_status)
         y -= 50
 
@@ -555,7 +629,6 @@ class PreferencesWindow:
                                   "forgetSpeaker:", self._delegate)
         pane.addSubview_(forget_btn)
         self._delegate._forget_btn = forget_btn
-        self._delegate._refresh_speakers()
         y -= 38
 
         pane.addSubview_(_make_label("AI Models", 20, y, 300, 22, bold=True))
@@ -564,7 +637,6 @@ class PreferencesWindow:
         pane.addSubview_(_make_button("Download Models", 20, y, 160, 28,
                                      "downloadModels:", self._delegate))
         self._delegate._deps_status = _make_status(190, y + 5, PW - 170)
-        self._delegate._deps_status.setStringValue_(_model_status())
         pane.addSubview_(self._delegate._deps_status)
 
         # ================================================================== #
