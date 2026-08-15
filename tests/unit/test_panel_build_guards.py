@@ -182,6 +182,10 @@ def _attrs_read_off(cls, *locals_):
     ``show()`` reaches through the delegate for widgets the delegate itself
     never mentions (``delegate._table_view.reloadData()``), so those are
     invisible to the helper above and need collecting from the caller's side.
+
+    Public names count. Filtering to a leading underscore made this return the
+    empty set for the data source, whose only use is ``data_source.setRows_``,
+    and the assertion built on it could not fail for any object at all.
     """
     tree = ast.parse(textwrap.dedent(inspect.getsource(cls)))
     return {
@@ -190,7 +194,6 @@ def _attrs_read_off(cls, *locals_):
         if isinstance(node, ast.Attribute)
         and isinstance(node.value, ast.Name)
         and node.value.id in locals_
-        and node.attr.startswith("_")
     }
 
 
@@ -211,6 +214,30 @@ def _controls_with_actions(view, seen=None):
         yield view, action
     for sub in view.subviews() or []:
         yield from _controls_with_actions(sub)
+
+
+# Each returns (owner, root view). The owner has to be returned and held, not
+# just built: an NSControl's target is a ZEROING WEAK reference, so letting the
+# panel fall out of scope deallocates its delegate and every target() reads back
+# as nil. A first version of these dropped the owner and the walk then reported
+# every selector in both panels as unanswered.
+def _built_preferences():
+    panel = PreferencesWindow()
+    panel._ensure_built()
+    return panel, panel._window.contentView()
+
+
+def _built_details():
+    panel = DetailsPanel(callback=None)
+    panel._ensure_built()
+    return panel, panel._window.contentView()
+
+
+def _built_popover():
+    from overheard.popover import TransportPopover
+
+    pop = TransportPopover({})
+    return pop, pop._panel.contentView()
 
 
 class TestTheRealBuildSucceeds:
@@ -266,6 +293,11 @@ class TestTheRealBuildSucceeds:
         promised = _attrs_read_but_never_assigned(type(delegate)) | _attrs_read_off(
             PreferencesWindow, "delegate"
         )
+        assert promised, (
+            "the derivation found nothing to check, so this test cannot fail. "
+            "A rewrite that reads widgets through a local alias would do that "
+            "silently"
+        )
         missing = sorted(name for name in promised if not hasattr(delegate, name))
         assert not missing, (
             f"_build never assigned these, and the delegate reads them: {missing}"
@@ -279,26 +311,36 @@ class TestTheRealBuildSucceeds:
         promised = _attrs_read_but_never_assigned(type(delegate)) | _attrs_read_off(
             DetailsPanel, "delegate"
         )
+        assert promised, "the derivation found nothing to check, see above"
         missing = sorted(name for name in promised if not hasattr(delegate, name))
         assert not missing, (
             f"_build never assigned these, and show() reads them: {missing}"
         )
 
         promised_source = _attrs_read_off(DetailsPanel, "data_source")
+        assert promised_source, (
+            "the data-source derivation found nothing. It returned the empty "
+            "set for a whole round, because setRows_ is a public name and the "
+            "filter demanded a leading underscore"
+        )
         missing_source = sorted(
             name for name in promised_source if not hasattr(data_source, name)
         )
         assert not missing_source, f"the data source is missing: {missing_source}"
 
     @pytest.mark.parametrize(
-        "make_panel",
+        "make_root",
         [
-            pytest.param(lambda: PreferencesWindow(), id="preferences"),
-            pytest.param(lambda: DetailsPanel(callback=None), id="details"),
+            pytest.param(_built_preferences, id="preferences"),
+            pytest.param(_built_details, id="details"),
+            # The popover is the only UI that is always on screen, and it was
+            # left out of this walk for a round. It builds in __init__ rather
+            # than through _ensure_built, and its window attribute is _panel.
+            pytest.param(_built_popover, id="popover"),
         ],
     )
     def test_every_wired_control_targets_something_that_answers(
-        self, make_panel, isolated_config
+        self, make_root, isolated_config
     ):
         """A misspelled selector is caught by running the code and nothing else.
 
@@ -311,10 +353,9 @@ class TestTheRealBuildSucceeds:
         Walking the real hierarchy rather than the source means a control added
         later is covered on the day it is added.
         """
-        panel = make_panel()
-        panel._ensure_built()
-
-        wired = list(_controls_with_actions(panel._window.contentView()))
+        owner, root = make_root()
+        assert owner is not None  # held for the duration: see _built_* above
+        wired = list(_controls_with_actions(root))
         assert wired, "found no wired controls at all, so this test proves nothing"
 
         dead = [

@@ -714,6 +714,13 @@ class TransportPopover:
         root.addSubview_(sys_row)
         self._sys_bar = sys_bar
         self._sys_row = sys_row
+        # Hidden until a recorder reports multichannel capture. configure_channels
+        # owns this afterwards, but it is only called from _poll_recorder_started,
+        # so between launch and the first successful record nothing would have
+        # set it. _set_meters_visible used to hide it as a side effect, which is
+        # what kept an idle popover from showing a dead system-audio meter under
+        # a speaker emoji on a machine that may never capture system audio.
+        sys_row.setHidden_(True)
 
         # ---- Wire as borderless NSPanel (no arrow) --------------------------
         panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(

@@ -209,8 +209,23 @@ class TestMalformedSegmentsDoNotCostTheTranscript:
             {"start": 1.0, "end": 2.0, "speaker": {"n": 1}},
             {"start": 2.0, "end": 3.0, "speaker": "SPEAKER_01", "embedding": [0.1, 0.2]},
             {"start": 3.0, "end": 4.0, "speaker": "SPEAKER_01", "embedding": [0.3, "x"]},
+            # Two accepted embeddings for ONE speaker, so mean_embeddings takes
+            # its accumulate branch. Without a second surviving embedding on the
+            # same label that branch never runs, and it is the only line in
+            # mean_embeddings that can raise: an earlier version of this test
+            # left exactly one survivor and therefore asserted nothing.
+            {"start": 4.0, "end": 5.0, "speaker": "SPEAKER_01", "embedding": [0.5, 0.6]},
+            # Ragged against the two above. Same speaker, different width.
+            {"start": 5.0, "end": 6.0, "speaker": "SPEAKER_01", "embedding": [0.1] * 256},
         ]})
         turns = diarization._diarize_fluidaudio("meeting.wav", with_embeddings=True)
+
+        widths = {len(t["embedding"]) for t in turns if t.get("embedding")}
+        assert len(widths) <= 1, f"the guard emitted ragged embeddings: {widths}"
+        assert sum(1 for t in turns if t.get("embedding")) >= 2, (
+            "fewer than two embeddings survived, so mean_embeddings never "
+            "reaches the accumulate branch and this test proves nothing"
+        )
 
         canonical, _order = diarization.canonicalize_turns(turns)
         speakers.mean_embeddings(canonical)

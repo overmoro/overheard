@@ -122,18 +122,35 @@ def transcribe_audio(
     library = None
     known: dict[str, str] = {}
     if remember_speakers and all_turns:
-        from overheard.speakers import SpeakerLibrary, mean_embeddings
+        # Speaker memory is an enhancement, and this runs after transcription
+        # has finished. Anything raising here escapes transcribe_audio, and the
+        # caller's finally deletes the temp WAV, so a voice-matching failure
+        # costs the entire meeting rather than the names on it.
+        #
+        # diarization guards the embeddings it emits, but the guard and this
+        # consumer are two places that have to agree about shape, and they have
+        # disagreed once already: element types were checked and lengths were
+        # not, so two embeddings of different lengths for one speaker reached
+        # numpy and raised on the accumulate. Correct the guard, and also make
+        # it structurally impossible for the next disagreement to cost a
+        # transcript.
+        try:
+            from overheard.speakers import SpeakerLibrary, mean_embeddings
 
-        label_embeddings = mean_embeddings(all_turns)
-        if label_embeddings:
-            library = SpeakerLibrary()
-            known = library.match_labels(
-                label_embeddings,
-                threshold=cfg.get("speaker_match_threshold"),
-            )
-            if known:
-                print(f"[overheard] recognised by voice: {sorted(known.values())}",
-                      file=sys.stderr)
+            label_embeddings = mean_embeddings(all_turns)
+            if label_embeddings:
+                library = SpeakerLibrary()
+                known = library.match_labels(
+                    label_embeddings,
+                    threshold=cfg.get("speaker_match_threshold"),
+                )
+                if known:
+                    print(f"[overheard] recognised by voice: {sorted(known.values())}",
+                          file=sys.stderr)
+        except Exception as e:
+            print(f"[overheard] speaker memory failed, continuing without it: {e}",
+                  file=sys.stderr)
+            label_embeddings, library, known = {}, None, {}
 
     speaker_map = build_speaker_map(
         local_labels, remote_labels, attendees,

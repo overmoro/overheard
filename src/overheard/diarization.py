@@ -105,6 +105,7 @@ def _diarize_fluidaudio(
 
     turns = []
     skipped = 0
+    width: int | None = None
     for segment in segments:
         if not isinstance(segment, dict):
             skipped += 1
@@ -142,6 +143,19 @@ def _diarize_fluidaudio(
                     for value in embedding
                 ):
                     raise TypeError("embedding was not a list of numbers")
+                # Length matters as much as element type, and checking only the
+                # elements is how the first version of this let the same loss
+                # through. mean_embeddings sums a speaker's vectors, so two
+                # accepted embeddings of different lengths raise on the
+                # accumulate, not on the parse: "operands could not be broadcast
+                # together". One arbitrary run of the diarizer therefore decides
+                # the width, and anything disagreeing with it is malformed.
+                if width is None:
+                    width = len(embedding)
+                elif len(embedding) != width:
+                    raise ValueError(
+                        f"embedding was {len(embedding)} wide, expected {width}"
+                    )
                 turn["embedding"] = embedding
         except (KeyError, TypeError, ValueError, AttributeError):
             skipped += 1

@@ -153,6 +153,25 @@ def test_every_custom_view_in_a_real_popover_can_draw():
     )
 
 
+def test_the_system_meter_row_is_hidden_before_any_recorder_reports():
+    """The launch ordering, which no other popover test uses.
+
+    configure_channels owns the row's visibility, and app.py only calls it from
+    _poll_recorder_started, after a recorder has started. So between launch and
+    the first successful record, and again after any failed start, nothing else
+    sets it. Both other popover tests call configure_channels first, which is
+    the one ordering the app never has at launch, and that is how a regression
+    leaving a dead grey system meter under a speaker emoji on an idle popover
+    went unnoticed.
+    """
+    pop = popover.TransportPopover({})
+    pop.set_state(state.IDLE, "Ready")
+    assert pop._sys_row.isHidden(), (
+        "the system meter row is visible before any recorder has reported "
+        "multichannel capture, so an idle popover shows a dead meter"
+    )
+
+
 def test_the_real_popover_survives_the_record_transition():
     """Pressing Record drives set_state then set_levels, and nothing tested it.
 
