@@ -162,11 +162,58 @@ class TestMalformedSegmentsDoNotCostTheTranscript:
         pytest.param({"start": None, "end": 1.0, "speaker": "A"}, id="null-start"),
         pytest.param({"start": "0.0s", "end": 1.0, "speaker": "A"}, id="non-numeric"),
         pytest.param({"start": 0.0, "end": "later", "speaker": "A"}, id="non-numeric-end"),
+        pytest.param({"start": 0.0, "end": 1.0, "speaker": {"n": 1}}, id="dict-speaker"),
+        pytest.param({"start": 0.0, "end": 1.0, "speaker": ["A"]}, id="list-speaker"),
+        pytest.param({"start": 0.0, "end": 1.0, "speaker": 7}, id="int-speaker"),
     ])
     def test_a_malformed_segment_is_skipped_not_fatal(self, helper_returning, segment):
         helper_returning({"segments": [segment]})
         result = diarization._diarize_fluidaudio("meeting.wav")
         assert result == [], f"{segment} should be skipped, got {result}"
+
+    @pytest.mark.parametrize("embedding", [
+        pytest.param("oops", id="string"),
+        pytest.param({"v": 1}, id="dict"),
+        pytest.param([0.1, "x", 0.3], id="list-with-a-string"),
+        pytest.param([[0.1], [0.2]], id="nested"),
+    ])
+    def test_a_malformed_embedding_is_skipped_not_fatal(self, helper_returning, embedding):
+        """The embedding was copied out of the guarded block, one line below it.
+
+        Nothing downstream re-checks it: speakers.mean_embeddings hands it
+        straight to np.asarray(dtype="float64"), and pipeline.transcribe_audio
+        calls that after transcription has finished and outside every try, so
+        the WAV is deleted in app._on_details_confirmed's finally. Speaker
+        memory is on by default, so this is the shipping configuration.
+        """
+        helper_returning({"segments": [
+            {"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00", "embedding": embedding},
+        ]})
+        result = diarization._diarize_fluidaudio("meeting.wav", with_embeddings=True)
+        assert result == [], f"{embedding!r} should be skipped, got {result}"
+
+    def test_whatever_survives_the_guard_survives_the_code_that_reads_it(
+        self, helper_returning
+    ):
+        """The guard is only worth what its consumers can actually swallow.
+
+        Asserting the guard skipped something tests the guard against itself.
+        This runs the two functions that receive its output on the meeting-
+        destroying path, so the assertion is the property that matters: nothing
+        the diarizer can emit reaches them in a shape they raise on.
+        """
+        from overheard import speakers
+
+        helper_returning({"segments": [
+            {"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00", "embedding": "oops"},
+            {"start": 1.0, "end": 2.0, "speaker": {"n": 1}},
+            {"start": 2.0, "end": 3.0, "speaker": "SPEAKER_01", "embedding": [0.1, 0.2]},
+            {"start": 3.0, "end": 4.0, "speaker": "SPEAKER_01", "embedding": [0.3, "x"]},
+        ]})
+        turns = diarization._diarize_fluidaudio("meeting.wav", with_embeddings=True)
+
+        canonical, _order = diarization.canonicalize_turns(turns)
+        speakers.mean_embeddings(canonical)
 
     def test_good_segments_survive_a_bad_neighbour(self, helper_returning):
         """One bad segment costs that segment, not the other speakers."""

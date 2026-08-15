@@ -467,13 +467,19 @@ class TransportPopover:
         self._panel:      Any = None
         self._status_btn: Any = None   # status bar button (for positioning)
         self._status_lbl: Any = None
-        self._mic_row:    Any = None
-        self._sys_row:    Any = None
 
-        # Our own views, declared without a value: _build runs before __init__
-        # returns and always assigns them, so None is not a state this object
-        # is ever observed in. Annotating them Optional instead would demand
-        # None checks guarding a case that cannot occur.
+        # Views _build always assigns, declared without a value: _build runs
+        # before __init__ returns, so None is not a state this object is ever
+        # observed in. Annotating them Optional instead would demand None checks
+        # guarding a case that cannot occur.
+        #
+        # The two meter rows belong here and not above. They are assigned in the
+        # same block of _build as the bars they contain, so the argument that
+        # removed the bars' falsiness guards applies to them verbatim. Leaving
+        # them defaulted to None was what kept two `if self._sys_row:` guards
+        # alive next to a comment explaining that such guards cannot fire.
+        self._mic_row:    Any
+        self._sys_row:    Any
         #
         # This does not make mypy check method names on them. _PillButton and
         # _LevelBar subclass NSView, which PyObjC leaves untyped, so every
@@ -572,23 +578,32 @@ class TransportPopover:
             self._sys_bar.setLevel_(_db(sys_rms))
 
     def configure_channels(self, is_multichannel):
+        """Sole owner of the system meter row's visibility.
+
+        The row is shown exactly when the capture is multichannel, and this is
+        the only method that changes _is_multichannel, so it is the only one
+        that needs to touch the row. _set_meters_visible used to set it too,
+        from the same expression, which left it ambiguous which of the two was
+        responsible.
+        """
         self._is_multichannel = is_multichannel
-        if self._sys_row:
-            self._sys_row.setHidden_(not is_multichannel)
+        self._sys_row.setHidden_(not is_multichannel)
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
     def _set_meters_visible(self, v):
-        # No falsiness guards on the bars: they are declared non-Optional
-        # because _build always assigns them, and an NSView subclass is always
-        # truthy anyway, so the guards could never fire. Keeping them would
-        # have the code hedging against a case the annotation says cannot
-        # happen, leaving the next reader to decide which to believe.
+        # No falsiness guards here: _build always assigns these, and an NSView
+        # subclass is always truthy anyway, so the guards could never fire.
+        # Keeping them would have the code hedging against a case the
+        # annotation says cannot happen, leaving the next reader to decide
+        # which of the two to believe.
+        #
+        # The row's visibility is configure_channels' job. Setting it here as
+        # well, from the same expression, was the same ambiguity one level up.
         self._mic_bar.setActive_(v)
         self._sys_bar.setActive_(v and self._is_multichannel)
-        if self._sys_row: self._sys_row.setHidden_(not self._is_multichannel)
 
     def _build(self, callbacks):
         d = self._delegate

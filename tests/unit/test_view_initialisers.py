@@ -163,10 +163,17 @@ def test_the_real_popover_survives_the_record_transition():
     attribute however spelled. Dropping ``self._sys_bar = sys_bar`` from _build
     and misspelling ``setActive_`` left all 270 tests green.
 
-    In production that AttributeError lands inside a rumps.Timer callback,
-    which rumps wraps in its own try/except. So the recorder is live and
-    capturing, the UI never leaves IDLE, Stop stays disabled, and a second press
-    of Record opens a second Core Audio tap on the same devices.
+    In production that AttributeError lands inside _poll_recorder_started, a
+    rumps.Timer callback, which rumps wraps in its own try/except. Be precise
+    about what that costs, because an earlier version of this docstring was not:
+    _set_state assigns app._state before delegating to the popover, and
+    set_state sets all three buttons and the status label before it reaches
+    _set_meters_visible, so the transport is left looking correct and _on_record
+    still refuses a second press.
+
+    What is actually lost is everything after the raise: _start_level_timer()
+    and _start_live() never run (app.py:200-201). The app records with dead
+    meters and no live transcript panel, and nothing on screen says why.
 
     Naming no attributes here is deliberate: the point is to run the real
     methods so every attribute name and selector spelling they depend on has to

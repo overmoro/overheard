@@ -137,15 +137,9 @@ class TestDownloadLatch:
         delegate.refresh_status()
         assert delegate._deps_status.value == "Downloading Parakeet TDT v3..."
 
-    def test_the_latch_clears_so_a_failed_download_can_be_retried(self, delegate, monkeypatch):
-        """A latch that survives a failure is a button that never works again."""
-        def explode():
-            raise RuntimeError("network gone")
-        monkeypatch.setattr(preferences.subprocess, "run", lambda *a, **k: explode())
-
-        delegate._downloading = True
-        delegate._do_download_models()
-        assert delegate._downloading is False
+    # The failure path lives in TestTheDownloadSuccessPath, on the real worker
+    # thread. It used to sit here, calling _do_download_models() directly on the
+    # main thread, which is a caller production does not have.
 
 
 class TestThreadSafety:
@@ -291,10 +285,13 @@ class TestTheDownloadSuccessPath:
 
     These run the worker on a REAL thread. An earlier version called
     _do_download_models directly on the main thread, where _finish_download and
-    _queue_refresh both short-circuit to a direct call. Production only ever
-    reaches this method from threading.Thread, so those short-circuits are dead
-    in the app and the marshalled branches are the only ones that run: both
-    could be deleted outright with the whole suite green.
+    _queue_refresh both short-circuited to a direct call.
+
+    That claim used to end "both could be deleted outright with the whole suite
+    green", which was false: one test rode those branches, so deleting them
+    failed it. The branches were dead in the app and alive only for that test.
+    Both are gone now and the test that needed them runs on a worker, so the
+    marshalled path is the only path, in the app and here.
     """
 
     @pytest.fixture
@@ -386,5 +383,24 @@ class TestTheDownloadSuccessPath:
         )
 
     def test_the_latch_is_clear_at_the_end(self, delegate, download_ready):
+        self._run_on_a_worker(delegate)
+        assert delegate._downloading is False
+
+    def test_the_latch_clears_after_a_failure(
+        self, delegate, download_ready, monkeypatch
+    ):
+        """A latch that survives a failure is a button that never works again.
+
+        This ran on the main thread until the eighth review round, which is a
+        caller production does not have: downloadModels_ only ever starts this
+        from threading.Thread. It was also the single test keeping the two
+        isMainThread() short-circuits alive, so the branch it exercised existed
+        for its benefit and for nothing else. Both are now gone and this runs
+        where the app runs it.
+        """
+        def explode(*args, **kwargs):
+            raise RuntimeError("network gone")
+
+        monkeypatch.setattr(preferences.subprocess, "run", explode)
         self._run_on_a_worker(delegate)
         assert delegate._downloading is False

@@ -107,6 +107,16 @@ _DIARIZATION_SUBDIR = "speaker-diarization"
 #: label reading Missing while the helper finds everything and returns in under
 #: a second: a Download button that completes instantly, changes nothing, and
 #: never stops asking.
+#:
+#: Note what "absent entirely" costs, because the two rules do pull against each
+#: other. A rename that leaves the old folder behind, partial, is not covered:
+#: the canonical check finds it, finds it incomplete, and answers False without
+#: ever reaching this glob. That is deliberate. The alternative, falling through
+#: to the glob whenever the canonical folder is incomplete, is precisely how a
+#: complete sibling comes to vouch for a half-downloaded live folder, which is
+#: the hazard the canonical rule exists to close. A wrong "Missing" costs one
+#: pointless Download click; a wrong "Installed" costs a meeting. So the rename
+#: tolerance here covers a clean rename only.
 _DIARIZATION_SUBDIR_GLOB = "speaker-diarization*"
 
 

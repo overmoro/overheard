@@ -362,26 +362,22 @@ class _PreferencesDelegate(NSObject):
     def _queue_refresh(self) -> None:
         """Ask the main thread to re-read everything, from a worker.
 
-        Direct when already on the main thread, for the same reason _set_label
-        is: an asynchronous perform would not have run by the time the caller
-        returns, and a test or a main-thread caller would see nothing happen.
+        No isMainThread() short-circuit. This is only ever reached from the
+        worker downloadModels_ starts, so that branch was dead in the app and
+        alive only for one test that called _do_download_models on the main
+        thread. Keeping it meant the download failure path was verified on a
+        branch production never takes, which is the defect class this unit
+        spent seven rounds on.
         """
-        if NSThread.isMainThread():
-            self.refresh_status()
-            return
         _perform_on_main(self, "refreshStatusOnMain:", None)
 
     @objc.python_method
     def _finish_download(self, generation) -> None:
         """Release the latch on the main thread, ordered after the label.
 
-        Direct when already on the main thread, for the same reason _set_label
-        is: an asynchronous perform would queue to a later run-loop pass, and
-        the caller would return with the latch still set.
+        No isMainThread() short-circuit, for the reason given on _queue_refresh:
+        production reaches this only from the download worker.
         """
-        if NSThread.isMainThread():
-            self.releaseDownload_(generation)
-            return
         _perform_on_main(self, "releaseDownload:", generation)
 
     @objc.python_method

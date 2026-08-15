@@ -12,7 +12,12 @@ produce the objects the panel needs, the caller gets a RuntimeError naming the
 problem, at the point of failure.
 """
 
+import ast
+import inspect
+import textwrap
+
 import pytest
+from AppKit import NSTabView
 
 from overheard.details_panel import DetailsPanel
 from overheard.preferences import PreferencesWindow
@@ -149,6 +154,65 @@ class TestDetailsPanel:
             panel._ensure_built()
 
 
+def _attrs_read_but_never_assigned(cls):
+    """Attributes a class reads off ``self`` and never assigns to itself.
+
+    Both delegates are populated from outside, by the panel's ``_build``, so
+    every name in this set is a promise ``_build`` has to keep. Deriving it from
+    the source rather than listing it means a widget added tomorrow is covered
+    without anyone remembering this file exists, and a widget renamed in only
+    one of the two places fails here.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(cls)))
+    reads, writes = set(), set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+        ):
+            target = writes if isinstance(node.ctx, ast.Store) else reads
+            target.add(node.attr)
+    return {name for name in reads - writes if name.startswith("_")}
+
+
+def _attrs_read_off(cls, *locals_):
+    """Attributes read off the objects ``_ensure_built`` hands back.
+
+    ``show()`` reaches through the delegate for widgets the delegate itself
+    never mentions (``delegate._table_view.reloadData()``), so those are
+    invisible to the helper above and need collecting from the caller's side.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(cls)))
+    return {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in locals_
+        and node.attr.startswith("_")
+    }
+
+
+def _controls_with_actions(view, seen=None):
+    """Every control in a built hierarchy that has a target/action wired.
+
+    NSTabView keeps its pages off the content view's subview tree, so the tabs
+    in Preferences are invisible to a plain walk and most of its buttons would
+    go unchecked.
+    """
+    if view is None:
+        return
+    if isinstance(view, NSTabView):
+        for item in view.tabViewItems():
+            yield from _controls_with_actions(item.view())
+    action = view.action() if hasattr(view, "action") else None
+    if action:
+        yield view, action
+    for sub in view.subviews() or []:
+        yield from _controls_with_actions(sub)
+
+
 class TestTheRealBuildSucceeds:
     """The half every other test in this file leaves out.
 
@@ -162,24 +226,106 @@ class TestTheRealBuildSucceeds:
     unreachable.
 
     A stand-in cannot catch that, because the statement lives in the code the
-    stand-in replaces. These two drive the real thing. Both run headless, which
-    is how the rest of this suite and CI run.
+    stand-in replaces. These drive the real thing.
+
+    Asserting only the sentinel was not enough either, and that was the next
+    round's finding: the rest of both builds stayed mutable with the suite
+    green. Deleting ``self._delegate._name_field = name_field``, or misspelling
+    ``setAction_("onStartTranscription:")``, left 274 tests passing while making
+    the details panel unopenable and the Start Transcription button inert. So
+    these tests assert the build's *output*: every widget the code reaches for,
+    and every selector it wires.
+
+    Both contracts are derived rather than listed. A hand-written list of
+    widgets would pass forever after the widget it names is renamed.
+
+    ``isolated_config`` is not optional here: ``_build`` reads output_dir,
+    obsidian_vault, obsidian_inbox and local_speaker_name, so without it these
+    tests read the developer's real config and the local run stops being the
+    same experiment as CI.
     """
 
-    def test_preferences_really_builds(self):
+    def test_preferences_really_builds(self, isolated_config):
         window = PreferencesWindow()
         delegate = window._ensure_built()
         assert delegate is not None
         assert window._built is True
 
-    def test_details_panel_really_builds(self):
+    def test_details_panel_really_builds(self, isolated_config):
         panel = DetailsPanel(callback=None)
         delegate, data_source = panel._ensure_built()
         assert delegate is not None
         assert data_source is not None
         assert panel._built is True
 
-    def test_a_real_finished_build_is_not_repeated(self, monkeypatch):
+    def test_the_preferences_build_keeps_every_promise_its_delegate_makes(
+        self, isolated_config
+    ):
+        window = PreferencesWindow()
+        delegate = window._ensure_built()
+        promised = _attrs_read_but_never_assigned(type(delegate)) | _attrs_read_off(
+            PreferencesWindow, "delegate"
+        )
+        missing = sorted(name for name in promised if not hasattr(delegate, name))
+        assert not missing, (
+            f"_build never assigned these, and the delegate reads them: {missing}"
+        )
+
+    def test_the_details_build_keeps_every_promise_its_delegate_makes(
+        self, isolated_config
+    ):
+        panel = DetailsPanel(callback=None)
+        delegate, data_source = panel._ensure_built()
+        promised = _attrs_read_but_never_assigned(type(delegate)) | _attrs_read_off(
+            DetailsPanel, "delegate"
+        )
+        missing = sorted(name for name in promised if not hasattr(delegate, name))
+        assert not missing, (
+            f"_build never assigned these, and show() reads them: {missing}"
+        )
+
+        promised_source = _attrs_read_off(DetailsPanel, "data_source")
+        missing_source = sorted(
+            name for name in promised_source if not hasattr(data_source, name)
+        )
+        assert not missing_source, f"the data source is missing: {missing_source}"
+
+    @pytest.mark.parametrize(
+        "make_panel",
+        [
+            pytest.param(lambda: PreferencesWindow(), id="preferences"),
+            pytest.param(lambda: DetailsPanel(callback=None), id="details"),
+        ],
+    )
+    def test_every_wired_control_targets_something_that_answers(
+        self, make_panel, isolated_config
+    ):
+        """A misspelled selector is caught by running the code and nothing else.
+
+        These modules subclass NSObject and NSView, which PyObjC leaves untyped,
+        so mypy accepts any spelling; they are excluded from the coverage
+        denominator too. Both panels wire their buttons the same way, target then
+        action, and a typo in the action string leaves a button that looks
+        correct and does nothing forever.
+
+        Walking the real hierarchy rather than the source means a control added
+        later is covered on the day it is added.
+        """
+        panel = make_panel()
+        panel._ensure_built()
+
+        wired = list(_controls_with_actions(panel._window.contentView()))
+        assert wired, "found no wired controls at all, so this test proves nothing"
+
+        dead = [
+            str(action)
+            for control, action in wired
+            if control.target() is None
+            or not control.target().respondsToSelector_(action)
+        ]
+        assert not dead, f"these controls are wired to a selector nobody answers: {dead}"
+
+    def test_a_real_finished_build_is_not_repeated(self, monkeypatch, isolated_config):
         """The sentinel test above, against the real build rather than a stub.
 
         Its stubbed twin sets ``_built`` inside the stub, so it passes whether or

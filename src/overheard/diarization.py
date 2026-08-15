@@ -115,19 +115,37 @@ def _diarize_fluidaudio(
         # the whole meeting down at the last step, since the caller deletes the
         # temp WAV once transcribe_audio fails. One bad segment costs that
         # segment.
+        #
+        # speaker and embedding are validated for the same reason the
+        # timestamps are, and they were left out of the first version of this
+        # guard. Neither raises here, so both travel intact to a caller that has
+        # no guard at all: a non-hashable speaker raises TypeError at
+        # order[turn["speaker"]] in canonicalize_turns, and a malformed
+        # embedding raises ValueError at np.asarray in speakers.mean_embeddings,
+        # which pipeline.transcribe_audio calls after transcription and outside
+        # every try. speaker_memory defaults to True, so that path is live.
         try:
             if segment.get("end", 0) <= segment.get("start", 0):
                 continue
+            speaker = segment["speaker"]
+            if not isinstance(speaker, str):
+                raise TypeError("speaker was not a string")
             turn = {
                 "start": float(segment["start"]),
                 "end": float(segment["end"]),
-                "speaker": segment["speaker"],
+                "speaker": speaker,
             }
+            embedding = segment.get("embedding") if with_embeddings else None
+            if embedding:
+                if not isinstance(embedding, (list, tuple)) or not all(
+                    isinstance(value, (int, float)) and not isinstance(value, bool)
+                    for value in embedding
+                ):
+                    raise TypeError("embedding was not a list of numbers")
+                turn["embedding"] = embedding
         except (KeyError, TypeError, ValueError, AttributeError):
             skipped += 1
             continue
-        if with_embeddings and segment.get("embedding"):
-            turn["embedding"] = segment["embedding"]
         turns.append(turn)
 
     if skipped:
