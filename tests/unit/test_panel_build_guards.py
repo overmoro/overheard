@@ -154,6 +154,21 @@ class TestDetailsPanel:
             panel._ensure_built()
 
 
+def _widgets_only(names, obj):
+    """Drop names that resolve to methods on the class.
+
+    ``_attrs_read_but_never_assigned`` returns the delegate's own helper methods
+    alongside its widgets, and a method is satisfied by the class definition
+    rather than by anything ``_build`` does. Of the 20 names it returns for the
+    preferences delegate, 9 are its own methods, so counting them made the set
+    look nearly twice as well covered as it is.
+    """
+    return {
+        name for name in names
+        if not callable(getattr(type(obj), name, None))
+    }
+
+
 def _attrs_read_but_never_assigned(cls):
     """Attributes a class reads off ``self`` and never assigns to itself.
 
@@ -290,14 +305,18 @@ class TestTheRealBuildSucceeds:
     ):
         window = PreferencesWindow()
         delegate = window._ensure_built()
-        promised = _attrs_read_but_never_assigned(type(delegate)) | _attrs_read_off(
-            PreferencesWindow, "delegate"
+        # Asserted separately, not on the union. The union always contains
+        # refresh_status, a method on the delegate class, so a non-emptiness
+        # check on it passed no matter what the load-bearing derivation did.
+        own = _widgets_only(_attrs_read_but_never_assigned(type(delegate)), delegate)
+        via_show = _attrs_read_off(PreferencesWindow, "delegate")
+        assert own, (
+            "the widget derivation found nothing, so this test cannot fail. A "
+            "rewrite reading widgets through a local alias would do that silently"
         )
-        assert promised, (
-            "the derivation found nothing to check, so this test cannot fail. "
-            "A rewrite that reads widgets through a local alias would do that "
-            "silently"
-        )
+        assert via_show, "the show() derivation found nothing"
+
+        promised = own | via_show
         missing = sorted(name for name in promised if not hasattr(delegate, name))
         assert not missing, (
             f"_build never assigned these, and the delegate reads them: {missing}"
@@ -308,10 +327,12 @@ class TestTheRealBuildSucceeds:
     ):
         panel = DetailsPanel(callback=None)
         delegate, data_source = panel._ensure_built()
-        promised = _attrs_read_but_never_assigned(type(delegate)) | _attrs_read_off(
-            DetailsPanel, "delegate"
-        )
-        assert promised, "the derivation found nothing to check, see above"
+        own = _widgets_only(_attrs_read_but_never_assigned(type(delegate)), delegate)
+        via_show = _attrs_read_off(DetailsPanel, "delegate")
+        assert own, "the widget derivation found nothing to check, see above"
+        assert via_show, "the show() derivation found nothing"
+
+        promised = own | via_show
         missing = sorted(name for name in promised if not hasattr(delegate, name))
         assert not missing, (
             f"_build never assigned these, and show() reads them: {missing}"

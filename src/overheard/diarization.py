@@ -35,6 +35,32 @@ def diarize(
     return turns if turns is not None else []
 
 
+#: FluidAudio's speaker embeddings are fixed at this width, which is why the
+#: --embeddings flag is described as 256 floats per segment where it is passed.
+#: Taking the width from the first embedding that happened to arrive instead
+#: made a malformed leading segment define what "correct" meant for the whole
+#: run, and everything well-formed behind it was then discarded as the outlier.
+_EMBEDDING_WIDTH = 256
+
+
+def _usable_embedding(embedding) -> bool:
+    """True for an embedding mean_embeddings can actually consume.
+
+    Both halves matter and only the first was checked once already. Element
+    type keeps a string out of np.asarray; width keeps two different shapes for
+    one speaker out of the accumulate, which is where numpy raises "operands
+    could not be broadcast together" rather than at the parse.
+    """
+    if not isinstance(embedding, (list, tuple)):
+        return False
+    if len(embedding) != _EMBEDDING_WIDTH:
+        return False
+    return all(
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        for value in embedding
+    )
+
+
 def _diarize_fluidaudio(
     audio_path: str, status_callback=None, max_speakers: int | None = None,
     with_embeddings: bool = False,
@@ -105,7 +131,7 @@ def _diarize_fluidaudio(
 
     turns = []
     skipped = 0
-    width: int | None = None
+    dropped_embeddings = 0
     for segment in segments:
         if not isinstance(segment, dict):
             skipped += 1
@@ -136,27 +162,22 @@ def _diarize_fluidaudio(
                 "end": float(segment["end"]),
                 "speaker": speaker,
             }
+            # A bad embedding costs the embedding, never the turn. Raising in
+            # here instead discarded start, end and speaker along with it, and
+            # with the width taken from whichever segment happened to arrive
+            # first, one malformed leading segment threw away every well-formed
+            # one behind it: assign_speakers then took its `if not turns` branch
+            # and labelled the entire meeting SPEAKER_00. The surviving vector
+            # was the malformed one, and _learn_confident_voices wrote it into
+            # the permanent library, where remember() replaces a stored profile
+            # outright on a shape mismatch. Twelve meetings of accumulated voice
+            # data, gone, from one bad segment.
             embedding = segment.get("embedding") if with_embeddings else None
+            if embedding and not _usable_embedding(embedding):
+                dropped_embeddings += 1
+                embedding = None
             if embedding:
-                if not isinstance(embedding, (list, tuple)) or not all(
-                    isinstance(value, (int, float)) and not isinstance(value, bool)
-                    for value in embedding
-                ):
-                    raise TypeError("embedding was not a list of numbers")
-                # Length matters as much as element type, and checking only the
-                # elements is how the first version of this let the same loss
-                # through. mean_embeddings sums a speaker's vectors, so two
-                # accepted embeddings of different lengths raise on the
-                # accumulate, not on the parse: "operands could not be broadcast
-                # together". One arbitrary run of the diarizer therefore decides
-                # the width, and anything disagreeing with it is malformed.
-                if width is None:
-                    width = len(embedding)
-                elif len(embedding) != width:
-                    raise ValueError(
-                        f"embedding was {len(embedding)} wide, expected {width}"
-                    )
-                turn["embedding"] = embedding
+                turn["embedding"] = list(embedding)
         except (KeyError, TypeError, ValueError, AttributeError):
             skipped += 1
             continue
@@ -164,6 +185,14 @@ def _diarize_fluidaudio(
 
     if skipped:
         print(f"[overheard] skipped {skipped} malformed diarizer segments",
+              file=sys.stderr)
+    if dropped_embeddings:
+        # Reported separately because it costs something different: the turn is
+        # intact and the meeting is still attributed, only cross-meeting voice
+        # matching loses that sample. Folding it into the count above would
+        # report a degradation as a data loss.
+        print(f"[overheard] dropped {dropped_embeddings} unusable embeddings, "
+              f"expected {_EMBEDDING_WIDTH} floats each",
               file=sys.stderr)
     return turns
 

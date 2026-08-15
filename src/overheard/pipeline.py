@@ -150,7 +150,12 @@ def transcribe_audio(
         except Exception as e:
             print(f"[overheard] speaker memory failed, continuing without it: {e}",
                   file=sys.stderr)
-            label_embeddings, library, known = {}, None, {}
+            # Only `known` is cleared. Setting library to None here as well made
+            # a failure to MATCH voices silently disable LEARNING them, and the
+            # local speaker's name comes off the mic track and never depended on
+            # matching at all. One bad entry in speakers.json would have meant
+            # never accumulating a voice profile again, with nothing said.
+            known = {}
 
     speaker_map = build_speaker_map(
         local_labels, remote_labels, attendees,
@@ -164,10 +169,20 @@ def transcribe_audio(
         speaker_map=speaker_map,
     )
 
-    _learn_confident_voices(
-        library, label_embeddings, speaker_map, known,
-        local_labels, remote_labels, attendees, mic_speaker,
-    )
+    # Guarded for the same reason the block above is, and more urgently: this
+    # runs AFTER write_markdown, so the transcript is already on disk and there
+    # is nothing left to gain by letting an exception through, while the caller
+    # still deletes the WAV and shows the user an error for a meeting that
+    # actually succeeded. It is also the half that WRITES persistent state, so
+    # it is where a shape disagreement between the guard and the library lands.
+    try:
+        _learn_confident_voices(
+            library, label_embeddings, speaker_map, known,
+            local_labels, remote_labels, attendees, mic_speaker,
+        )
+    except Exception as e:
+        print(f"[overheard] could not update the voice library: {e}",
+              file=sys.stderr)
 
     return output_path
 

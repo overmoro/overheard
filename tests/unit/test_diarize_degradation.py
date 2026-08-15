@@ -176,21 +176,60 @@ class TestMalformedSegmentsDoNotCostTheTranscript:
         pytest.param({"v": 1}, id="dict"),
         pytest.param([0.1, "x", 0.3], id="list-with-a-string"),
         pytest.param([[0.1], [0.2]], id="nested"),
+        pytest.param([0.1, 0.2], id="too-narrow"),
+        pytest.param([0.1] * 512, id="too-wide"),
     ])
-    def test_a_malformed_embedding_is_skipped_not_fatal(self, helper_returning, embedding):
-        """The embedding was copied out of the guarded block, one line below it.
+    def test_a_malformed_embedding_costs_the_embedding_not_the_turn(
+        self, helper_returning, embedding
+    ):
+        """An embedding is optional metadata and must not cost the diarization.
 
-        Nothing downstream re-checks it: speakers.mean_embeddings hands it
-        straight to np.asarray(dtype="float64"), and pipeline.transcribe_audio
-        calls that after transcription has finished and outside every try, so
-        the WAV is deleted in app._on_details_confirmed's finally. Speaker
-        memory is on by default, so this is the shipping configuration.
+        This asserted the whole segment was dropped until round ten, which is
+        what made a bad segment so expensive: start, end and speaker went with
+        it. With the width taken from the first arrival, one malformed leading
+        segment discarded every good one behind it, assign_speakers fell to its
+        `if not turns` branch, and the meeting lost all speaker attribution.
+
+        Nothing downstream re-checks the vector: speakers.mean_embeddings hands
+        it to np.asarray(dtype="float64"), and pipeline calls that after
+        transcription. So it has to be dropped here, and only it.
         """
         helper_returning({"segments": [
             {"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00", "embedding": embedding},
         ]})
         result = diarization._diarize_fluidaudio("meeting.wav", with_embeddings=True)
-        assert result == [], f"{embedding!r} should be skipped, got {result}"
+
+        assert len(result) == 1, f"the turn was discarded with its embedding: {result}"
+        assert "embedding" not in result[0], (
+            f"{embedding!r} reached the caller, which hands it to numpy"
+        )
+        assert result[0]["speaker"] == "SPEAKER_00"
+
+    def test_one_bad_leading_embedding_cannot_discard_the_whole_meeting(
+        self, helper_returning
+    ):
+        """The critical from round ten, as its own case.
+
+        The width used to be whatever the first accepted embedding happened to
+        be, so a 2-wide segment at the front made every correct 256-wide segment
+        behind it the outlier. Four of five turns were thrown away and the only
+        surviving vector was the malformed one, which then went into the
+        permanent speaker library and replaced a real profile.
+        """
+        helper_returning({"segments": [
+            {"start": 0.0, "end": 1.0, "speaker": "A", "embedding": [0.1, 0.2]},
+            {"start": 1.0, "end": 2.0, "speaker": "B", "embedding": [0.1] * 256},
+            {"start": 2.0, "end": 3.0, "speaker": "A", "embedding": [0.2] * 256},
+            {"start": 3.0, "end": 4.0, "speaker": "B", "embedding": [0.3] * 256},
+        ]})
+        result = diarization._diarize_fluidaudio("meeting.wav", with_embeddings=True)
+
+        assert len(result) == 4, (
+            f"a bad leading segment cost {4 - len(result)} good turns, and "
+            "losing every turn labels the whole meeting SPEAKER_00"
+        )
+        widths = {len(t["embedding"]) for t in result if t.get("embedding")}
+        assert widths == {256}, f"the wrong width became canonical: {widths}"
 
     def test_whatever_survives_the_guard_survives_the_code_that_reads_it(
         self, helper_returning
@@ -207,16 +246,18 @@ class TestMalformedSegmentsDoNotCostTheTranscript:
         helper_returning({"segments": [
             {"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00", "embedding": "oops"},
             {"start": 1.0, "end": 2.0, "speaker": {"n": 1}},
-            {"start": 2.0, "end": 3.0, "speaker": "SPEAKER_01", "embedding": [0.1, 0.2]},
-            {"start": 3.0, "end": 4.0, "speaker": "SPEAKER_01", "embedding": [0.3, "x"]},
-            # Two accepted embeddings for ONE speaker, so mean_embeddings takes
-            # its accumulate branch. Without a second surviving embedding on the
-            # same label that branch never runs, and it is the only line in
-            # mean_embeddings that can raise: an earlier version of this test
-            # left exactly one survivor and therefore asserted nothing.
-            {"start": 4.0, "end": 5.0, "speaker": "SPEAKER_01", "embedding": [0.5, 0.6]},
-            # Ragged against the two above. Same speaker, different width.
-            {"start": 5.0, "end": 6.0, "speaker": "SPEAKER_01", "embedding": [0.1] * 256},
+            {"start": 2.0, "end": 3.0, "speaker": "SPEAKER_01", "embedding": [0.3, "x"]},
+            # Two ACCEPTED embeddings for one speaker, so mean_embeddings takes
+            # its accumulate branch. Without a second survivor on the same label
+            # that branch never runs, and it is the only line in mean_embeddings
+            # that can raise: an earlier version of this test left exactly one
+            # survivor and therefore asserted nothing. The assertion below now
+            # fails rather than letting that recur, which is how the round-ten
+            # width change was caught here rather than in review.
+            {"start": 3.0, "end": 4.0, "speaker": "SPEAKER_01", "embedding": [0.1] * 256},
+            {"start": 4.0, "end": 5.0, "speaker": "SPEAKER_01", "embedding": [0.5] * 256},
+            # Ragged against those two. Same speaker, wrong width.
+            {"start": 5.0, "end": 6.0, "speaker": "SPEAKER_01", "embedding": [0.2] * 128},
         ]})
         turns = diarization._diarize_fluidaudio("meeting.wav", with_embeddings=True)
 
