@@ -1,18 +1,15 @@
 """Who spoke when, and attaching that to the words.
 
 Two halves. First diarization proper, which returns ``{start, end, speaker}``
-turns from one of two backends. Then the join back onto the transcript, which
-relabels the diarizer's arbitrary cluster numbering into first-speech order and
-splits transcript segments on speaker boundaries.
+turns from FluidAudio. Then the join back onto the transcript, which relabels
+the diarizer's arbitrary cluster numbering into first-speech order and splits
+transcript segments on speaker boundaries.
 
 A failed diarization is not fatal anywhere in here. A transcript with no speaker
 labels is still worth having; a transcript that never got written is not.
 """
 
-import os
 import sys
-
-from overheard import config as cfg
 
 
 def diarize(
@@ -21,29 +18,21 @@ def diarize(
 ) -> list[dict]:
     """Run speaker diarization, returning {start, end, speaker} turns.
 
-    FluidAudio is the default: it runs on the Neural Engine, needs no Hugging
-    Face account or gated model, and measured 104x realtime against pyannote's
-    roughly 1x on the same audio. pyannote remains as a fallback, selectable
-    with the ``diarizer`` config key, but its dependencies are now optional.
+    Diarization runs through FluidAudio on the Neural Engine: no Hugging Face
+    account, no gated model, and measured 104x realtime.
+
+    A pyannote fallback lived here until the single-engine cut. It could not
+    fire for anyone running the bundled app, because it needed HF_TOKEN, a
+    gated model accepted on the Hub, and torch installed as an optional extra.
 
     Returns an empty list when diarization is unavailable. That is deliberately
     not fatal: a transcript without speaker labels is still worth having.
     """
-    backend = cfg.get("diarizer").lower()
-
-    if backend in ("auto", "fluidaudio"):
-        turns = _diarize_fluidaudio(
-            audio_path, status_callback=status_callback, max_speakers=max_speakers,
-            with_embeddings=with_embeddings,
-        )
-        if turns is not None:
-            return turns
-        if backend == "fluidaudio":
-            return []
-        print("[overheard] FluidAudio diarization unavailable, trying pyannote",
-              file=sys.stderr)
-
-    return _diarize_pyannote(audio_path, status_callback=status_callback)
+    turns = _diarize_fluidaudio(
+        audio_path, status_callback=status_callback, max_speakers=max_speakers,
+        with_embeddings=with_embeddings,
+    )
+    return turns if turns is not None else []
 
 
 def _diarize_fluidaudio(
@@ -107,51 +96,6 @@ def _diarize_fluidaudio(
             turn["embedding"] = segment["embedding"]
         turns.append(turn)
     return turns
-
-
-def _diarize_pyannote(audio_path: str, status_callback=None) -> list[dict]:
-    """Fallback diarization through pyannote.
-
-    Kept for comparison and for machines where the helper cannot run. Needs
-    HF_TOKEN in the environment and pulls in torch, so it is an optional extra
-    rather than a default dependency.
-    """
-    if status_callback:
-        status_callback("Diarizing...")
-
-    hf_token = os.environ.get("HF_TOKEN")
-
-    try:
-        import torch
-        from pyannote.audio import Pipeline
-        import torchaudio
-
-        diarize_pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1", token=hf_token
-        )
-        if diarize_pipeline is None:
-            raise RuntimeError(
-                "pyannote returned no pipeline; the model is gated and needs a "
-                "valid HF_TOKEN on first download."
-            )
-
-        # pyannote's speaker embedding model runs happily on MPS
-        device = "mps" if torch.backends.mps.is_available() else "cpu"
-        diarize_pipeline.to(torch.device(device))
-
-        # Pre-load audio as a tensor to bypass torchcodec (broken on PyTorch 2.8+)
-        waveform, sample_rate = torchaudio.load(audio_path)
-        output = diarize_pipeline({"waveform": waveform, "sample_rate": sample_rate})
-    except Exception as e:
-        print(f"[overheard] diarization unavailable, continuing without speakers: {e}")
-        return []
-
-    # DiarizeOutput is a named tuple, so extract the Annotation
-    annotation = getattr(output, "speaker_diarization", output)
-    return [
-        {"start": turn.start, "end": turn.end, "speaker": speaker}
-        for turn, _, speaker in annotation.itertracks(yield_label=True)
-    ]
 
 
 def canonicalize_turns(

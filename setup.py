@@ -56,10 +56,10 @@ OPTIONS = {
     "excludes": [
         # Large ML packages live in system site-packages; not bundled.
         # They are resolved at runtime via semi_standalone mode.
-        "torch",
-        "torchaudio",
-        "whisperx",
-        "pyannote",
+        #
+        # torch, torchaudio, whisperx and pyannote were listed here until the
+        # single-engine cut. Nothing imports them now, so naming them would
+        # describe a dependency the app no longer has.
         "transformers",
         "huggingface_hub",
     ],

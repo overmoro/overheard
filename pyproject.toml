@@ -18,15 +18,11 @@ dependencies = [
     "scipy>=1.11.0",
 ]
 
-# Diarization and ASR both run through bundled native code by default, so
-# neither torch nor a Hugging Face account is needed for a working install.
-# These extras exist for comparison and as fallbacks.
+# Diarization and ASR both run through bundled native code, so neither torch
+# nor a Hugging Face account is needed anywhere. The optional whisper and
+# pyannote extras were removed with the single-engine cut, which is what keeps
+# torch out of the standalone bundle entirely.
 [project.optional-dependencies]
-# The original CPU Whisper path, selectable via the "engine" config key.
-whisper = ["whisperx>=3.1.0"]
-# Fallback diarizer, selectable via the "diarizer" config key. Pulls in torch
-# and needs HF_TOKEN for the gated pyannote model.
-pyannote = ["pyannote.audio>=3.1.0", "torch>=2.0.0", "torchaudio>=2.0.0"]
 dev = ["pytest>=7.0.0", "pytest-cov>=4.0.0", "mypy>=1.11", "ruff>=0.6"]
 
 [tool.pytest.ini_options]

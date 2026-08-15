@@ -50,18 +50,11 @@ class Settings:
     #: used to disagree, showing "Don" in one and "You" in the other.
     local_speaker_name: str = "Don"
 
-    #: Transcription engine: "parakeet" (MLX, GPU) or "whisper" (WhisperX, CPU).
-    engine: str = "parakeet"
-
-    #: Show a running transcript while recording (parakeet engine only).
+    #: Show a running transcript while recording.
     live_preview: bool = True
 
     #: Capture backend: "auto" (tap when available), "tap", or "device".
     capture_backend: str = "auto"
-
-    #: Diarizer: "auto" (FluidAudio, falling back to pyannote), "fluidaudio",
-    #: or "pyannote". pyannote needs HF_TOKEN and the optional extra installed.
-    diarizer: str = "auto"
 
     #: Label speakers in the live transcript using streaming diarization.
     #: Needs separate mic and system tracks; at most four concurrent speakers.
@@ -77,9 +70,6 @@ class Settings:
 
     #: Keep the recorded WAV alongside the transcript instead of deleting it.
     keep_recordings: bool = False
-
-    #: Hugging Face token, consulted only by the optional pyannote fallback.
-    hf_token: str = ""
 
 
 _FIELDS = {f.name: f for f in fields(Settings)}

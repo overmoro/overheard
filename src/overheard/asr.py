@@ -1,30 +1,18 @@
-"""Speech to text, in two interchangeable engines.
+"""Speech to text, through NVIDIA Parakeet TDT 0.6B v3 via MLX.
 
-Selected by the ``engine`` config key:
+Runs on the Apple Silicon GPU and emits word-level timestamps natively, so no
+separate forced-alignment pass is needed. It covers 25 European languages
+including English and detects the language itself, without configuration.
 
-- ``parakeet`` (default): NVIDIA Parakeet TDT 0.6B v3 via MLX, running on the
-  Apple Silicon GPU. Emits word-level timestamps natively, so no separate
-  forced-alignment pass is needed.
-- ``whisper``: the original WhisperX large-v3 path, kept for comparison. It
-  runs on CPU because ctranslate2 has no MPS backend.
+Returns a list of ``{start, end, text, words: [{start, end, word}]}``.
 
-Both return the same shape, a list of
-``{start, end, text, words: [{start, end, word}]}``, which is what lets the rest
-of the pipeline stay engine-agnostic.
+A second WhisperX engine lived here until the single-engine cut. It ran on CPU
+because ctranslate2 has no MPS backend, needed a second model download for the
+alignment pass Parakeet does natively, and disabled the live transcript. Its
+only unique reach was the non-European languages, which no setting exposed.
 """
 
-import warnings
-
-# torchcodec is incompatible with PyTorch 2.8, so suppress the wall of warnings
-# the whisper path emits on import.
-warnings.filterwarnings("ignore", message="torchcodec is not installed correctly")
-
 PARAKEET_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
-WHISPER_MODEL = "large-v3"
-
-# WhisperX loads through faster-whisper, which caches under the CTranslate2
-# conversion rather than under the bare model size above.
-WHISPER_REPO = "Systran/faster-whisper-large-v3"
 
 # Parakeet handles long audio by chunking with overlap. Full attention over an
 # hour-long meeting would exhaust memory, so chunk unless told otherwise.
@@ -124,63 +112,6 @@ def transcribe_parakeet(audio_path: str, status_callback=None) -> list[dict]:
         segments.append({
             "start": sentence.start,
             "end": sentence.end,
-            "text": text,
-            "words": words,
-        })
-
-    return segments
-
-
-def transcribe_whisper(
-    audio_path: str,
-    model_size: str = WHISPER_MODEL,
-    language: str = "en",
-    status_callback=None,
-) -> list[dict]:
-    """Transcribe with WhisperX, including the forced-alignment pass.
-
-    ctranslate2 has no MPS backend, so this runs on CPU at int8.
-    """
-    import whisperx
-
-    compute_device = "cpu"
-    compute_type = "int8"  # int8 is fastest on CPU; float16 for GPU
-
-    if status_callback:
-        status_callback("Transcribing...")
-
-    model = whisperx.load_model(
-        model_size,
-        compute_device,
-        compute_type=compute_type,
-        language=language,
-    )
-    audio = whisperx.load_audio(audio_path)
-    result = model.transcribe(audio, batch_size=8)
-
-    if status_callback:
-        status_callback("Aligning...")
-
-    align_model, metadata = whisperx.load_align_model(
-        language_code=language, device=compute_device
-    )
-    result = whisperx.align(
-        result["segments"], align_model, metadata, audio, compute_device
-    )
-
-    segments = []
-    for seg in result.get("segments", []):
-        text = (seg.get("text") or "").strip()
-        if not text:
-            continue
-        words = [
-            {"start": w["start"], "end": w["end"], "word": w.get("word", "")}
-            for w in seg.get("words", [])
-            if w.get("start") is not None and w.get("end") is not None
-        ]
-        segments.append({
-            "start": seg.get("start", 0.0),
-            "end": seg.get("end", 0.0),
             "text": text,
             "words": words,
         })

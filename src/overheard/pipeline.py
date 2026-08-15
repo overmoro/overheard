@@ -15,7 +15,7 @@ import os
 import sys
 
 from overheard import config as cfg
-from overheard.asr import WHISPER_MODEL, transcribe_parakeet, transcribe_whisper
+from overheard.asr import transcribe_parakeet
 from overheard.diarization import assign_speakers, canonicalize_turns, diarize
 from overheard.render import write_markdown
 from overheard.speakers import build_speaker_map
@@ -25,12 +25,9 @@ from overheard.tracks import check_audio_signal, drop_echo, split_tracks, warn_s
 def transcribe_audio(
     audio_path: str,
     output_path: str,
-    model_size: str | None = None,
-    language: str = "en",
     status_callback=None,
     meeting_details=None,   # MeetingDetails | None
     mic_speaker: str | None = None,
-    engine: str | None = None,
     channels_info: dict | None = None,
 ) -> str:
     """Transcribe audio and write a diarized markdown file.
@@ -38,13 +35,10 @@ def transcribe_audio(
     Args:
         audio_path: Path to the WAV file to transcribe.
         output_path: Path for the output markdown file.
-        model_size: Whisper model size; ignored by the parakeet engine.
-        language: Language code, used by the whisper engine only.
         status_callback: Optional callable for progress updates.
         meeting_details: Optional MeetingDetails for frontmatter and speaker labels.
         mic_speaker: Name for the local speaker, the one heard on the microphone
             track. Used when channels_info identifies a separate mic channel.
-        engine: "parakeet" or "whisper". Defaults to the ``engine`` config key.
         channels_info: {"mic_channel": int, "system_channels": [int, ...]} from
             the recorder. When present the two sides are handled as separate
             tracks. None for mono recordings.
@@ -52,10 +46,6 @@ def transcribe_audio(
     Returns:
         The output_path on success.
     """
-    engine = (engine or cfg.get("engine")).lower()
-    if engine not in ("parakeet", "whisper"):
-        raise ValueError(f"Unknown transcription engine: {engine!r}")
-
     # Pre-flight: check audio has meaningful signal before loading models
     check_audio_signal(audio_path)
 
@@ -80,18 +70,10 @@ def transcribe_audio(
             if status_callback and len(tracks) > 1:
                 status_callback(f"Transcribing {label}...")
 
-            if engine == "whisper":
-                segments = transcribe_whisper(
-                    track["path"],
-                    model_size=model_size or WHISPER_MODEL,
-                    language=language,
-                    status_callback=status_callback if len(tracks) == 1 else None,
-                )
-            else:
-                segments = transcribe_parakeet(
-                    track["path"],
-                    status_callback=status_callback if len(tracks) == 1 else None,
-                )
+            segments = transcribe_parakeet(
+                track["path"],
+                status_callback=status_callback if len(tracks) == 1 else None,
+            )
 
             turns = diarize(
                 track["path"],

@@ -72,9 +72,7 @@ Every key, its type and its default value are declared in one place,
 
 | Key | Description |
 |---|---|
-| `engine` | `parakeet` (GPU) or `whisper` (CPU, 99 languages) |
 | `capture_backend` | `auto`, `tap`, or `device` |
-| `diarizer` | `auto`, `fluidaudio`, or `pyannote` |
 | `live_preview` | Show the running transcript while recording |
 | `live_speakers` | Label speakers in the live transcript using streaming diarization |
 | `output_dir` | Where transcripts are written |
@@ -85,17 +83,10 @@ Every key, its type and its default value are declared in one place,
 | `speaker_memory` | Remember voices between meetings so returning speakers are recognised |
 | `speaker_match_threshold` | Cosine similarity required to treat a voice as a known person |
 | `keep_recordings` | Keep the audio alongside the transcript |
-| `hf_token` | Hugging Face token, consulted only by the optional pyannote fallback |
 
-No environment variables are required. `HF_TOKEN` is consulted only if you
-deliberately select the `pyannote` diarizer.
-
-### Optional extras
-
-```bash
-pip install -e '.[whisper]'    # WhisperX, for the CPU engine
-pip install -e '.[pyannote]'   # pyannote fallback diarizer, pulls in torch
-```
+No environment variables are required, and no Hugging Face account. Both
+transcription and diarization run through bundled native code on Apple silicon,
+so torch is not a dependency at all.
 
 ## Development
 

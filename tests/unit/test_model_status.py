@@ -56,7 +56,11 @@ class TestIsModelCached:
         _install(hf_cache, "meta-llama/Llama-3.1-8B-Instruct")
         assert asr.is_model_cached("mlx-community/parakeet-tdt-0.6b-v3") is False
 
-    def test_the_whisper_repo_is_the_ctranslate2_conversion(self):
-        """WHISPER_MODEL is a size, not a repo, so checking it would always miss."""
-        assert "/" in asr.WHISPER_REPO
-        assert "/" not in asr.WHISPER_MODEL
+    def test_the_parakeet_constant_is_a_repo_id(self):
+        """A bare model size would never match a cache folder, so it must be a repo.
+
+        The whisper engine's constant was a size rather than a repo id, which is
+        why a second WHISPER_REPO existed alongside it. One engine, one constant,
+        and this pins it as the kind of name the cache is actually keyed on.
+        """
+        assert "/" in asr.PARAKEET_MODEL

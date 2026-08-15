@@ -24,9 +24,9 @@ class TestSchema:
         """
         for key in (
             "output_dir", "obsidian_enabled", "obsidian_vault", "obsidian_inbox",
-            "local_speaker_name", "engine", "live_preview", "capture_backend",
-            "diarizer", "live_speakers", "speaker_memory",
-            "speaker_match_threshold", "keep_recordings", "hf_token",
+            "local_speaker_name", "live_preview", "capture_backend",
+            "live_speakers", "speaker_memory",
+            "speaker_match_threshold", "keep_recordings",
         ):
             assert key in settings.DEFAULTS, f"{key} is read by the app but not declared"
 
@@ -40,11 +40,11 @@ class TestSchema:
     def test_get_takes_no_default_argument(self):
         """The signature is the enforcement. A default cannot be passed in."""
         with pytest.raises(TypeError):
-            cfg.get("engine", "whisper")
+            cfg.get("capture_backend", "tap")
 
     def test_settings_are_frozen(self):
         with pytest.raises(Exception):
-            settings.load().engine = "whisper"
+            settings.load().capture_backend = "tap"
 
 
 class TestFixedBugs:
@@ -69,14 +69,16 @@ class TestFixedBugs:
 
 class TestReadingTheFile:
     def test_stored_values_win_over_defaults(self, isolated_config):
-        cfg.set_value("engine", "whisper")
-        assert cfg.get("engine") == "whisper"
+        cfg.set_value("capture_backend", "tap")
+        assert cfg.get("capture_backend") == "tap"
 
     def test_absent_keys_fall_back_to_the_declared_default(self, isolated_config):
-        (isolated_config / "config.json").write_text(json.dumps({"engine": "whisper"}))
+        (isolated_config / "config.json").write_text(
+            json.dumps({"capture_backend": "tap"})
+        )
         loaded = settings.load()
-        assert loaded.engine == "whisper"
-        assert loaded.diarizer == "auto"
+        assert loaded.capture_backend == "tap"
+        assert loaded.local_speaker_name == "Don"
 
     def test_a_corrupt_file_reads_as_all_defaults(self, isolated_config):
         (isolated_config / "config.json").write_text("{not json")
@@ -87,15 +89,15 @@ class TestReadingTheFile:
 
     def test_unknown_stored_keys_are_ignored_not_fatal(self, isolated_config):
         (isolated_config / "config.json").write_text(
-            json.dumps({"engine": "whisper", "from_a_future_version": True})
+            json.dumps({"capture_backend": "tap", "from_a_future_version": True})
         )
-        assert settings.load().engine == "whisper"
+        assert settings.load().capture_backend == "tap"
 
     def test_unknown_stored_keys_survive_a_write(self, isolated_config):
         """Dropping a key a newer version wrote would silently lose settings."""
         path = isolated_config / "config.json"
         path.write_text(json.dumps({"from_a_future_version": True}))
-        cfg.set_value("engine", "whisper")
+        cfg.set_value("capture_backend", "tap")
         assert json.loads(path.read_text())["from_a_future_version"] is True
 
 
@@ -121,8 +123,10 @@ class TestCoercion:
         assert "speaker_match_threshold" in capsys.readouterr().err
 
     def test_a_wrongly_typed_string_falls_back(self, isolated_config):
-        (isolated_config / "config.json").write_text(json.dumps({"engine": 3}))
-        assert settings.load().engine == "parakeet"
+        (isolated_config / "config.json").write_text(
+            json.dumps({"capture_backend": 3})
+        )
+        assert settings.load().capture_backend == "auto"
 
     def test_an_uncoercible_value_is_repaired_by_an_unrelated_write(self, isolated_config):
         """A write to one key also repairs a different key that was already broken.

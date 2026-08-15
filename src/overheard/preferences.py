@@ -32,18 +32,12 @@ from typing import Any
 
 # Window dimensions
 WIN_W = 500
-WIN_H = 460   # tall enough for the Transcription pane's engine picker
+WIN_H = 460
 
-# Engine choice, in popup-menu order
-_ENGINES = ["parakeet", "whisper"]
-_ENGINE_TITLES = [
-    "Parakeet TDT 0.6B v3 (fast, on GPU)",
-    "Whisper large-v3 (slower, on CPU)",
-]
-_ENGINE_BLURB = {
-    "parakeet": "Runs on the Apple Silicon GPU. Supports live transcription.",
-    "whisper": "Runs on CPU, far slower, but handles 99 languages.",
-}
+_ENGINE_BLURB = (
+    "Parakeet TDT 0.6B v3, on the Apple Silicon GPU. Detects its own language "
+    "across 25 European languages."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -174,17 +168,6 @@ class _PreferencesDelegate(NSObject):
                 f"Process taps unavailable ({why}). The fallback below needs BlackHole."
             )
 
-    def selectEngine_(self, sender):
-        """Radio-style engine selection driven by the popup button."""
-        engine = "whisper" if sender.indexOfSelectedItem() == 1 else "parakeet"
-        cfg.set_value("engine", engine)
-        self._engine_status.setStringValue_(_ENGINE_BLURB[engine])
-        # Live preview is streamed by Parakeet, so it's meaningless on Whisper
-        self._live_check.setEnabled_(engine == "parakeet")
-        # Model status is per engine: Parakeet being installed says nothing
-        # about whether the 3 GB Whisper repo is.
-        self.refresh_status()
-
     def toggleLivePreview_(self, sender):
         cfg.set_value("live_preview", bool(sender.state()))
 
@@ -229,20 +212,11 @@ class _PreferencesDelegate(NSObject):
 
     def _do_download_models(self):
         try:
-            # Only fetch the model for the engine actually in use. Whisper
-            # large-v3 is a 3 GB download nobody on Parakeet needs.
-            engine = cfg.get("engine")
-            if engine == "whisper":
-                self._deps_status.setStringValue_("Downloading whisper large-v3...")
-                code = ("import whisperx; "
-                        "whisperx.load_model('large-v3', 'cpu', compute_type='int8')")
-                label = "Whisper"
-            else:
-                self._deps_status.setStringValue_("Downloading Parakeet TDT v3...")
-                from overheard.asr import PARAKEET_MODEL
-                code = ("from parakeet_mlx import from_pretrained; "
-                        f"from_pretrained({PARAKEET_MODEL!r})")
-                label = "Parakeet"
+            self._deps_status.setStringValue_("Downloading Parakeet TDT v3...")
+            from overheard.asr import PARAKEET_MODEL
+            code = ("from parakeet_mlx import from_pretrained; "
+                    f"from_pretrained({PARAKEET_MODEL!r})")
+            label = "Parakeet"
 
             result = subprocess.run(
                 ["python3", "-c", code],
@@ -366,13 +340,10 @@ def _model_status() -> str:
     indistinguishable from a real check and wrong for anyone who had already
     downloaded.
     """
-    from overheard import config as cfg
-    from overheard.asr import PARAKEET_MODEL, WHISPER_REPO, is_model_cached
+    from overheard.asr import PARAKEET_MODEL, is_model_cached
     from overheard.helper import diarization_models_present
 
-    engine = cfg.get("engine")
-    repo = WHISPER_REPO if engine == "whisper" else PARAKEET_MODEL
-    have_asr = is_model_cached(repo)
+    have_asr = is_model_cached(PARAKEET_MODEL)
     have_diar = diarization_models_present()
 
     if have_asr and have_diar:
@@ -524,26 +495,11 @@ class PreferencesWindow:
         y = 340
         from AppKit import NSPopUpButton, NSButton as _NSBtn
 
-        current_engine = cfg.get("engine")
-        if current_engine not in _ENGINES:
-            current_engine = "parakeet"
-
         pane.addSubview_(_make_label("Engine", 20, y, 300, 22, bold=True))
         y -= 32
 
-        engine_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-            NSMakeRect(20, y, PW - 20, 26), False
-        )
-        engine_popup.addItemsWithTitles_(_ENGINE_TITLES)
-        engine_popup.selectItemAtIndex_(_ENGINES.index(current_engine))
-        engine_popup.setTarget_(self._delegate)
-        engine_popup.setAction_("selectEngine:")
-        pane.addSubview_(engine_popup)
-        self._delegate._engine_popup = engine_popup
-        y -= 24
-
         self._delegate._engine_status = _make_status(20, y, PW)
-        self._delegate._engine_status.setStringValue_(_ENGINE_BLURB[current_engine])
+        self._delegate._engine_status.setStringValue_(_ENGINE_BLURB)
         pane.addSubview_(self._delegate._engine_status)
         y -= 28
 
@@ -553,9 +509,7 @@ class PreferencesWindow:
         live_check.setState_(1 if cfg.get("live_preview") else 0)
         live_check.setTarget_(self._delegate)
         live_check.setAction_("toggleLivePreview:")
-        live_check.setEnabled_(current_engine == "parakeet")
         pane.addSubview_(live_check)
-        self._delegate._live_check = live_check
         y -= 42
 
         pane.addSubview_(_make_label("Speakers", 20, y, 300, 22, bold=True))
