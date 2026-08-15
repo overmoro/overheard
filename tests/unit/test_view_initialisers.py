@@ -14,8 +14,18 @@ Record called ``configure_channels(True)``, which unhid the system meter row,
 the row drew for the first time, and Overheard vanished with SIGTRAP and no
 traceback anywhere.
 
-The structural test is the one that matters: it catches the pattern rather than
-this one instance, and it derives the view list instead of enumerating it.
+There are two layers of defence now, and they catch different things:
+
+- ``_LevelBar`` carries class-level ``_level`` and ``_active`` defaults, so a
+  draw can no longer raise even if no initialiser ran at all.
+- ``initWithFrame_`` assigns them on the instance, which is the correct fix.
+
+The defaults are what make the draw tests below unable to reach the original
+crash on their own: with them in place, deleting ``initWithFrame_`` outright
+leaves every drawing test green. That is a good property of the shipping code
+and a bad property of a test that claims to reproduce the bug, so the tests
+here assert against the instance rather than against the value, which is the
+one thing a class default cannot fake.
 """
 
 import pytest
@@ -24,15 +34,19 @@ from AppKit import NSImage, NSMakeRect, NSView
 from overheard import popover
 
 
-def custom_views():
+def custom_view_classes():
     """Every NSView subclass defined in popover, found rather than listed."""
     for name, obj in vars(popover).items():
         if (isinstance(obj, type) and name.startswith("_")
                 and obj is not NSView and issubclass(obj, NSView)):
-            yield pytest.param(obj, id=name)
+            yield obj
 
 
-@pytest.mark.parametrize("view_class", list(custom_views()))
+def custom_views():
+    return [pytest.param(cls, id=cls.__name__) for cls in custom_view_classes()]
+
+
+@pytest.mark.parametrize("view_class", custom_views())
 def test_an_init_override_is_not_silently_skipped(view_class):
     """A view overriding init but not initWithFrame_ is a trap.
 
@@ -48,9 +62,20 @@ def test_an_init_override_is_not_silently_skipped(view_class):
         )
 
 
-def test_the_level_bar_is_usable_when_built_with_initwithframe():
-    """The exact construction _build uses."""
+def test_the_level_bar_initialiser_populates_the_instance():
+    """The construction _build uses, asserted where a class default cannot reach.
+
+    Reading ``bar._level`` and finding 0.0 proves nothing on its own: the class
+    carries ``_level = 0.0`` as a backstop, so that assertion passes with the
+    initialiser deleted entirely. The instance dict is the discriminator. It is
+    populated only by code that actually ran against this object.
+    """
     bar = popover._LevelBar.alloc().initWithFrame_(NSMakeRect(0, 0, 120, 10))
+    assert set(bar.__dict__) >= {"_level", "_active"}, (
+        "initWithFrame_ did not assign the instance attributes; the values "
+        f"being readable comes from the class defaults. Instance has: "
+        f"{sorted(bar.__dict__)}"
+    )
     assert bar._level == 0.0
     assert bar._active is False
 
@@ -70,18 +95,19 @@ def _draw(view):
         image.unlockFocus()
 
 
-def test_an_undrawn_level_bar_still_draws():
-    """The failing case: built, never told a level, then asked to draw.
+def test_a_level_bar_draws_before_being_given_a_level():
+    """Drawing an untouched view, which is the order the crash happened in.
 
-    Calling setLevel_ or setActive_ first would create the very attributes the
-    missing initialiser failed to assign, so a test that sets before drawing
-    can never reach the bug. That is what the first version of this file did.
+    This cannot fail on the original bug any more, because the class defaults
+    absorb a missing initialiser. What it does guard is the next custom view
+    whose drawRect_ reads an attribute that has neither a class default nor an
+    assignment, which is the same defect wearing different clothes.
     """
     _draw(popover._LevelBar.alloc().initWithFrame_(NSMakeRect(0, 0, 120, 10)))
 
 
 def test_a_level_bar_draws_after_being_given_a_level():
-    """The ordinary path, drawn only after the undrawn case above has run."""
+    """The ordinary path, drawn only after the untouched case above has run."""
     bar = popover._LevelBar.alloc().initWithFrame_(NSMakeRect(0, 0, 120, 10))
     bar.setActive_(True)
     bar.setLevel_(0.75)
@@ -94,21 +120,34 @@ def _all_subviews(view):
         yield from _all_subviews(sub)
 
 
-def test_every_view_in_a_real_popover_can_draw():
-    """The end-to-end guard, and the one that covers _PillButton.
+def test_every_custom_view_in_a_real_popover_can_draw():
+    """The end-to-end guard: build the real popover and draw everything in it.
 
     configure_channels(True) only unhides the row; it does not itself draw, so
     asserting it returns cleanly proves nothing. What killed the app was the
-    draw that AppKit performed afterwards. This builds the real popover, shows
-    the system meter row, and then draws every view in it.
+    draw AppKit performed afterwards.
+
+    The assertion is on the set of classes reached, derived from the same
+    helper the parametrised test uses. A count would not do: the popover holds
+    three _PillButtons, so a floor of four is satisfied with both _LevelBars
+    absent, and _LevelBar is the class this whole file exists for. Naming the
+    classes means a view dropping out of the hierarchy fails by name, and a new
+    custom view is covered without anyone remembering to update a number.
     """
     pop = popover.TransportPopover({})
     pop.configure_channels(True)
     assert pop._is_multichannel is True
 
-    drawn = 0
+    drawn = set()
     for view in _all_subviews(pop._panel.contentView()):
         if type(view).__module__ == popover.__name__:
             _draw(view)
-            drawn += 1
-    assert drawn >= 4, f"expected the custom views to be reached, drew {drawn}"
+            drawn.add(type(view))
+
+    expected = set(custom_view_classes())
+    missing = expected - drawn
+    assert not missing, (
+        "these custom views were never drawn: "
+        f"{sorted(cls.__name__ for cls in missing)}. Drew: "
+        f"{sorted(cls.__name__ for cls in drawn)}"
+    )
