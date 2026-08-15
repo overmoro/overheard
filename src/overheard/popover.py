@@ -1,6 +1,7 @@
 """Overheard: menu bar popover transport UI."""
 
 import math
+import sys
 from typing import Any
 
 import objc
@@ -27,7 +28,7 @@ from AppKit import (
 from Foundation import NSAttributedString, NSObject, NSTimer
 
 from overheard.state import IDLE, PAUSED, RECORDING, TRANSCRIBING
-from overheard.objc_safety import objc_safe
+from overheard.objc_safety import objc_safe, objc_safe_noarg
 
 # ---------------------------------------------------------------------------
 # Geometry
@@ -176,8 +177,23 @@ class _PillButton(NSView):
             )
         )
 
+    @objc_safe_noarg
     def updateTrackingAreas(self):
-        self._setup_tracking()
+        """AppKit calls this on every bounds change, window move and resize.
+
+        _setup_tracking builds an NSTrackingArea from the current bounds, and a
+        degenerate rect during a live resize makes addTrackingArea_ raise. That
+        unwinds straight back into AppKit and aborts the process, so it is the
+        same class as the guarded actions, just without a sender argument.
+
+        super() is called outside the guarded helper deliberately: AppKit needs
+        it whether or not our own tracking setup worked, and skipping it would
+        trade a crash for a view that stops receiving mouse events.
+        """
+        try:
+            self._setup_tracking()
+        except Exception as e:
+            print(f"[overheard] tracking area setup failed: {e}", file=sys.stderr)
         objc.super(_PillButton, self).updateTrackingAreas()
 
     # ---- State --------------------------------------------------------

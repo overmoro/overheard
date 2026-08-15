@@ -83,9 +83,32 @@ def _diarize_fluidaudio(
         print(f"[overheard] could not parse diarize output: {e}", file=sys.stderr)
         return None
 
+    # Guarding the segment loop and not the payload above it was fixing the
+    # instance and leaving the class. `{"segments": null}` is what a Swift
+    # Encodable with an optional array produces, and .get's default only fires
+    # when the key is absent, not when it is null; a bare `[]`, `null` or a
+    # string payload has no .get at all. Each of those raised past diarize()
+    # and out of transcribe_audio, whose caller then deletes the temp WAV, so a
+    # fully transcribed meeting was destroyed by output the diarizer produced.
+    if not isinstance(payload, dict):
+        print(f"[overheard] diarize output was {type(payload).__name__}, not an object",
+              file=sys.stderr)
+        return None
+
+    segments = payload.get("segments")
+    if segments is None:
+        segments = []
+    if not isinstance(segments, (list, tuple)):
+        print(f"[overheard] diarize segments were {type(segments).__name__}, not a list",
+              file=sys.stderr)
+        return None
+
     turns = []
     skipped = 0
-    for segment in payload.get("segments", []):
+    for segment in segments:
+        if not isinstance(segment, dict):
+            skipped += 1
+            continue
         # Well-formed JSON is not well-formed output. A missing key, a null
         # timestamp or a non-numeric one all raise here, and this loop sits
         # after transcription has already run: an exception escaping it takes

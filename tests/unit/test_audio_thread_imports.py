@@ -133,6 +133,30 @@ def test_downmixing_imports_nothing():
     assert guard.attempted == [], f"first-time imports on the audio path: {guard.attempted}"
 
 
+def _a_transcriber():
+    """A LiveTranscriber wired up enough for feed() to run end to end.
+
+    Built by listing what __init__ assigns rather than by guessing, because
+    guessing is how the first version of this helper omitted _elapsed and
+    _bucket_index and made the test below vacuous. The real __init__ is not
+    used because it loads a model.
+    """
+    transcriber = live.LiveTranscriber.__new__(live.LiveTranscriber)
+    transcriber.sample_rate = 48000
+    transcriber.channels_info = {"mic_channel": 0, "system_channels": [1]}
+    transcriber._stop_event = threading.Event()
+    transcriber._queue = queue.Queue(maxsize=8)
+    transcriber._lock = threading.Lock()
+    transcriber._pending = np.zeros(0, dtype=np.float32)
+    transcriber._chunk_frames = 16000
+    transcriber.diarizer = None
+    transcriber._energy = []
+    transcriber._t0 = 0.0
+    transcriber._elapsed = 0.0
+    transcriber._bucket_index = []
+    return transcriber
+
+
 def test_the_registered_tap_callback_imports_nothing():
     """The function actually wired to the recorder, not just its helpers.
 
@@ -147,19 +171,12 @@ def test_the_registered_tap_callback_imports_nothing():
     calls. This exercises feed itself, so a lazy import added anywhere along
     that chain, including in _record_energy or _enqueue, is caught.
     """
-    transcriber = live.LiveTranscriber.__new__(live.LiveTranscriber)
-    transcriber.sample_rate = 48000
-    transcriber.channels_info = {"mic_channel": 0, "system_channels": [1]}
-    transcriber._stop_event = threading.Event()
-    transcriber._queue = queue.Queue(maxsize=8)
-    transcriber._lock = threading.Lock()
-    transcriber._pending = np.zeros(0, dtype=np.float32)
-    transcriber._chunk_frames = 16000
-    transcriber.diarizer = None
-    transcriber._energy = []
-    transcriber._t0 = 0.0
+    transcriber = _a_transcriber()
 
-    block = np.zeros((4800, 2), dtype=np.float32)
+    # Big enough to fill a chunk, so the enqueue branch inside feed actually
+    # runs. A short block leaves _pending under _chunk_frames and _enqueue is
+    # never reached, which left a third of the hot path uncovered.
+    block = np.zeros((48000 + 4800, 2), dtype=np.float32)
     with NoImportsAllowed() as guard:
         transcriber.feed(block)
 
@@ -168,6 +185,38 @@ def test_the_registered_tap_callback_imports_nothing():
         f"{guard.attempted}. feed() swallows AssertionError, so this "
         "assertion is the only thing that can see them."
     )
+    # feed() must have run all the way through, or this proves nothing. An
+    # earlier version hand-built the transcriber and omitted two attributes, so
+    # feed died on its second line, its own except Exception swallowed it,
+    # attempted was empty, and the test passed while covering none of the chain
+    # it names. These assertions are what make that impossible.
+    assert len(transcriber._pending) == 1600, (
+        "feed() did not reach _resample; 52800 frames at 48k is 17600 at 16k, "
+        f"leaving 1600 after one 16000-frame chunk. Got {len(transcriber._pending)}"
+    )
+    assert not transcriber._queue.empty(), (
+        "feed() did not reach _enqueue, so a lazy import there is invisible"
+    )
+
+
+def test_the_transcriber_stand_in_can_actually_feed(capsys):
+    """The stand-in has to be complete, or every test using it is vacuous.
+
+    Deliberately ordered AFTER the guarded test above. It calls feed() without
+    the guard installed, so running it first would warm any module the guarded
+    test is about to watch for, and hide a real violation.
+
+    feed() catches everything and prints, so an incomplete stand-in fails
+    silently and takes the assertions with it. This checks the stderr channel
+    that swallowing writes to.
+    """
+    transcriber = _a_transcriber()
+    transcriber.feed(np.zeros((4800, 2), dtype=np.float32))
+    err = capsys.readouterr().err
+    assert "live feed error" not in err, (
+        f"feed() swallowed an exception, so the stand-in is incomplete: {err}"
+    )
+    assert len(transcriber._pending) == 1600
 
 
 def test_a_swallowed_import_is_still_recorded(warm_package):

@@ -167,49 +167,148 @@ class TestFirstPartyObjCMethodsAreGuarded:
 
         assert "failed" in capsys.readouterr().err
 
-    def test_every_appkit_dispatched_delegate_action_is_guarded(self):
-        """Derived, so a new action is covered without anyone remembering.
+    def test_every_method_on_a_first_party_objc_class_is_accounted_for(self):
+        """Closed set with named exclusions, not an allow-list of prefixes.
 
-        Guarding by hand means guarding the ones somebody thought of, which is
-        how the transport buttons stayed exposed while two callbacks that rumps
-        already covered got guards.
+        The first version filtered by name prefix, which is a negative
+        assertion over an open set: it covered the vocabulary somebody thought
+        of. Two plainly dispatched methods, windowWillClose_ and
+        validateMenuItem_, matched no prefix and passed straight through it,
+        and every zero-argument method was invisible because the filter also
+        required a trailing underscore.
+
+        This walks every method on every first-party NSObject and NSView
+        subclass and requires each one to be either guarded or consciously
+        excluded. Anything new fails until somebody classifies it, which is the
+        only shape that closes an open set.
         """
         import inspect
         from overheard import details_panel, live_panel, popover, preferences
 
-        # Methods AppKit dispatches that carry a user action or an event.
-        # Excluded by design: init* (they must return self), the table data
-        # source methods (they must return typed values, so a guard returning
-        # None would break the table), and our own setters.
-        prefixes = ("on", "toggle", "browse", "save", "open", "quit", "create",
-                    "download", "connect", "forget", "show", "mouse", "draw",
-                    "refresh", "release", "select")
-        skip = {"initWithFrame_", "initWithCallbacks_", "initWithWindow_",
-                "initWithPanel_", "initWithIcon_label_color_callback_",
-                "initWithCallback_discardCallback_", "setLevel_", "setActive_",
-                "setEnabled_", "setRows_"}
+        # Excluded, each for a stated reason:
+        #   init*        must return self, and a guard returning None on
+        #                failure would be read by ObjC as "init failed", which
+        #                is a different contract than the one we want.
+        #   set*/names   called only by our own code, never dispatched.
+        #   accepts*     must return a bool; None reads as False and would
+        #                silently change responder behaviour. Bodies are a
+        #                single `return True` and cannot raise.
+        #   numberOfRows/tableView_*  guarded separately below, because they
+        #                must return typed values rather than None.
+        EXCLUDED = {
+            "initWithFrame_", "initWithCallbacks_", "initWithWindow_",
+            "initWithPanel_", "initWithIcon_label_color_callback_",
+            "initWithCallback_discardCallback_", "init",
+            "setLevel_", "setActive_", "setEnabled_", "setRows_", "names",
+            "acceptsFirstResponder", "acceptsFirstMouse_",
+            "numberOfRowsInTableView_",
+            "tableView_objectValueForTableColumn_row_",
+            "tableView_setObjectValue_forTableColumn_row_",
+            # PyObjC injects this on every NSObject subclass. Not ours.
+            "bundleForClass",
+            # Not dispatched: reached only through refreshStatusOnMain_, which
+            # is guarded, and through show(), which the app.py boundary
+            # guards. It also guards each label independently already.
+            "refresh_status",
+        }
 
-        unguarded = []
+        unaccounted = []
         for module in (popover, preferences, details_panel, live_panel):
             for _, cls in inspect.getmembers(module, inspect.isclass):
                 if cls.__module__ != module.__name__:
                     continue
-                for name, fn in vars(cls).items():
-                    if not name.endswith("_") or name in skip:
+                if not any(base.__name__ in ("NSObject", "NSView")
+                           for base in inspect.getmro(cls)[1:]):
+                    continue
+                for name, attr in vars(cls).items():
+                    if name.startswith("__") or name in EXCLUDED:
                         continue
-                    if not any(name.lower().startswith(p) for p in prefixes):
+                    # Anything starting with a single underscore is ours to
+                    # call, not something AppKit dispatches by selector.
+                    if name.startswith("_"):
                         continue
                     # PyObjC replaces the function with a selector object and
                     # keeps the original on .callable, so the decorator's
-                    # __wrapped__ marker lives there rather than on the
-                    # attribute itself.
-                    underlying = getattr(fn, "callable", fn)
+                    # marker lives there.
+                    underlying = getattr(attr, "callable", attr)
                     if not callable(underlying):
                         continue
                     if getattr(underlying, "__wrapped__", None) is None:
-                        unguarded.append(f"{module.__name__}.{cls.__name__}.{name}")
+                        unaccounted.append(f"{cls.__name__}.{name}")
 
-        assert not unguarded, (
-            "these AppKit-dispatched methods have no objc_safe guard, so an "
-            f"exception in one aborts the process with no traceback: {unguarded}"
+        assert not unaccounted, (
+            "these methods on first-party ObjC classes are neither guarded nor "
+            "listed in EXCLUDED, so an exception in one aborts the process "
+            f"with no traceback: {sorted(unaccounted)}"
         )
+
+
+class TestAFailedStopLandsInADefinedState:
+    """Guarding the button stops the abort; it does not make the app coherent.
+
+    _on_stop tears down the level timer and detaches the live tap before the
+    fallible recorder.stop(), and neither can be undone. Without an explicit
+    landing, the guard left the app showing RECORDING with a dead recorder
+    behind it, the meters frozen and nothing on screen changed: the crash
+    became a button that does nothing, which is not a failure reaching the
+    user.
+    """
+
+    def _app_mid_recording(self, stop_raises):
+        from overheard.state import RECORDING
+
+        instance = app_module.TranscriberApp.__new__(app_module.TranscriberApp)
+        instance._state = RECORDING
+
+        class Recorder:
+            sample_rate = 48000
+
+            def set_tap(self, tap):
+                pass
+
+            def stop(self):
+                if stop_raises:
+                    raise MemoryError("np.concatenate over an hour of chunks")
+                return None, None
+
+        instance._recorder = Recorder()
+        instance._stop_level_timer = lambda: None
+        instance._stop_live = lambda: None
+        instance.states = []
+        instance._set_state = lambda state, text="": instance.states.append((state, text))
+        return instance
+
+    def test_a_failing_stop_leaves_the_app_idle_and_says_so(self, monkeypatch, capsys):
+        from overheard.state import IDLE
+
+        notes = []
+        monkeypatch.setattr(
+            app_module.rumps, "notification",
+            lambda *a, **k: notes.append(a),
+        )
+        instance = self._app_mid_recording(stop_raises=True)
+
+        instance._on_stop()          # guarded at the button; must land cleanly
+
+        assert instance._recorder is None, "a dead recorder must not be kept"
+        assert instance.states, "no state transition happened at all"
+        final_state, final_text = instance.states[-1]
+        assert final_state == IDLE, (
+            f"the app stayed in {final_state} with a dead recorder, so the UI "
+            "still claims to be recording"
+        )
+        assert "failed" in final_text.lower()
+        assert notes, "the user was told nothing"
+        assert "could not be stopped" in capsys.readouterr().err
+
+    def test_a_successful_stop_is_unaffected(self, monkeypatch):
+        """The guard must not change the ordinary path."""
+        from overheard.state import IDLE
+
+        monkeypatch.setattr(app_module.rumps, "notification", lambda *a, **k: None)
+        instance = self._app_mid_recording(stop_raises=False)
+
+        instance._on_stop()
+
+        assert instance._recorder is None
+        assert instance.states[-1][0] == IDLE

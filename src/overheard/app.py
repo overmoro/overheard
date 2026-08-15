@@ -281,8 +281,30 @@ class TranscriberApp(rumps.App):
         self._recorder.set_tap(None)
 
         # Stop recorder and grab audio on the calling thread (fast).
-        audio, channels_info = self._recorder.stop()
-        record_rate = self._recorder.sample_rate
+        #
+        # This is fallible in two ways that both surface here: proc.wait after
+        # a kill can time out, and np.concatenate over an hour of multichannel
+        # chunks can raise MemoryError. The two teardown steps above have
+        # already run and cannot be undone, so there is no recording to return
+        # to. The objc_safe guard on the button keeps that from aborting the
+        # process; without this, it would instead leave the app showing
+        # RECORDING with a dead recorder behind it, and a second press of Stop
+        # would call stop() on it again.
+        try:
+            audio, channels_info = self._recorder.stop()
+            record_rate = self._recorder.sample_rate
+        except Exception as e:
+            print(f"[overheard] the recorder could not be stopped: {e}", file=sys.stderr)
+            traceback.print_exc()
+            self._recorder = None
+            self._stop_live()
+            self._set_state(IDLE, "Recording failed, see the log")
+            rumps.notification(
+                "Overheard", "Recording failed",
+                "The recorder could not be stopped. Details are in the log.",
+            )
+            return
+
         self._recorder = None
         self._stop_live()
 

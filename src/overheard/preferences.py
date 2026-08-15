@@ -388,6 +388,7 @@ class _PreferencesDelegate(NSObject):
     def _do_download_models(self, generation=None):
         if generation is None:
             generation = self._download_generation
+        succeeded = False
         try:
             _set_label(self._deps_status, "Downloading Parakeet TDT v3...")
             from overheard.asr import PARAKEET_MODEL
@@ -422,20 +423,25 @@ class _PreferencesDelegate(NSObject):
                     )
                     return
 
-            self._queue_refresh()
+            succeeded = True
         except subprocess.TimeoutExpired:
             _set_label(self._deps_status, "✗ Download timed out")
         except Exception as e:
             _set_label(self._deps_status, f"✗ {e}")
         finally:
-            # The single release point, for every path through this method.
-            # An earlier version released on the success path and again here,
-            # because a return inside a try still runs its finally, and the
-            # comment claiming otherwise was the real hazard: the next edit
-            # would have reasoned from it. Queued after the label writes above
-            # and after the refresh, so the latch outlives the "Downloading..."
-            # text rather than clearing while the pane still shows it.
+            # The single release point, for every path through this method. An
+            # earlier version released on the success path and again here,
+            # because a return inside a try still runs its finally.
+            #
+            # It has to happen BEFORE the refresh, not after. refresh_status
+            # skips the dependency label while the latch is set, so releasing
+            # afterwards left the pane reading "Downloading..." forever with a
+            # live button underneath, which is the double click the latch is
+            # there to prevent. Releasing first also means the button is only
+            # live once the label says what actually happened.
             self._finish_download(generation)
+            if succeeded:
+                self._queue_refresh()
 
     # ---- Output Folder -----------------------------------------------------
 
