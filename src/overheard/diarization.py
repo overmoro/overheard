@@ -9,6 +9,7 @@ A failed diarization is not fatal anywhere in here. A transcript with no speaker
 labels is still worth having; a transcript that never got written is not.
 """
 
+import math
 import sys
 
 
@@ -44,21 +45,49 @@ _EMBEDDING_WIDTH = 256
 
 
 def _usable_embedding(embedding) -> bool:
-    """True for an embedding mean_embeddings can actually consume.
+    """True for an embedding that can be stored as somebody's voice.
 
-    Both halves matter and only the first was checked once already. Element
-    type keeps a string out of np.asarray; width keeps two different shapes for
-    one speaker out of the accumulate, which is where numpy raises "operands
-    could not be broadcast together" rather than at the parse.
+    Four properties, and each of the first three was added only after the one
+    before it turned out not to be enough on its own:
+
+    - a list or tuple, so np.asarray does not choke on a string
+    - exactly _EMBEDDING_WIDTH, so two shapes for one speaker cannot meet in
+      mean_embeddings, where numpy raises on the accumulate rather than at the
+      parse
+    - real numbers, not bools
+    - finite and not all zero
+
+    That last line is doing more work than it looks. FluidAudio returns
+    [0.0] * 256 as an explicit sentinel in two places, for a speaker below its
+    activity threshold and as a fallback when the model output has no embedding
+    feature (EmbeddingExtractor.swift:75 and :110). It is a well-formed vector
+    meaning "extraction failed", and everything downstream treats it as a voice:
+    it survives mean_embeddings unchanged, is truthy, and library.remember
+    stores it as a real profile. From then on _cosine sees a zero norm and
+    returns 0.0 for every comparison, so that person can never be recognised
+    again while Preferences shows them as having a profile. Silent, and it only
+    clears if the same name is later learned from a real vector.
+
+    Non-finite values are rejected for the same reason rather than a
+    demonstrated one: a NaN folded into a stored profile makes every future
+    cosine NaN, and remember cannot undo it since (nan * n + x) / (n + 1) is
+    still nan. The helper serialises through JSONSerialization, which rejects
+    non-conforming doubles and aborts the run, so this is not reachable today.
+    It is one predicate away, this module owns the contract, and the cost of
+    being wrong about reachability here is a voice profile that cannot recover.
     """
     if not isinstance(embedding, (list, tuple)):
         return False
     if len(embedding) != _EMBEDDING_WIDTH:
         return False
-    return all(
-        isinstance(value, (int, float)) and not isinstance(value, bool)
+    if not all(
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
         for value in embedding
-    )
+    ):
+        return False
+    return any(embedding)
 
 
 def _diarize_fluidaudio(

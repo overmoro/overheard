@@ -305,16 +305,22 @@ class TestTheRealBuildSucceeds:
     ):
         window = PreferencesWindow()
         delegate = window._ensure_built()
-        # Asserted separately, not on the union. The union always contains
-        # refresh_status, a method on the delegate class, so a non-emptiness
-        # check on it passed no matter what the load-bearing derivation did.
+        # Both halves get _widgets_only, or the asymmetry hides the gap it was
+        # added to expose: PreferencesWindow.show() reads only
+        # delegate.refresh_status, a method, so the show() derivation
+        # contributes nothing checkable here and an unfiltered non-emptiness
+        # assertion passed on the strength of that method alone.
+        #
+        # So only `own` is asserted non-empty. That is the honest state: on this
+        # panel every widget is reached through the delegate's own methods, and
+        # if show() ever touches one directly it will start contributing here.
+        # The details panel is the opposite way round and asserts both.
         own = _widgets_only(_attrs_read_but_never_assigned(type(delegate)), delegate)
-        via_show = _attrs_read_off(PreferencesWindow, "delegate")
+        via_show = _widgets_only(_attrs_read_off(PreferencesWindow, "delegate"), delegate)
         assert own, (
             "the widget derivation found nothing, so this test cannot fail. A "
             "rewrite reading widgets through a local alias would do that silently"
         )
-        assert via_show, "the show() derivation found nothing"
 
         promised = own | via_show
         missing = sorted(name for name in promised if not hasattr(delegate, name))
@@ -328,8 +334,11 @@ class TestTheRealBuildSucceeds:
         panel = DetailsPanel(callback=None)
         delegate, data_source = panel._ensure_built()
         own = _widgets_only(_attrs_read_but_never_assigned(type(delegate)), delegate)
-        via_show = _attrs_read_off(DetailsPanel, "delegate")
+        via_show = _widgets_only(_attrs_read_off(DetailsPanel, "delegate"), delegate)
         assert own, "the widget derivation found nothing to check, see above"
+        # Unlike Preferences, show() here reaches through the delegate for four
+        # real widgets (_name_field, _location_field, _source_popup,
+        # _table_view), so this half genuinely carries weight and is asserted.
         assert via_show, "the show() derivation found nothing"
 
         promised = own | via_show

@@ -178,6 +178,13 @@ class TestMalformedSegmentsDoNotCostTheTranscript:
         pytest.param([[0.1], [0.2]], id="nested"),
         pytest.param([0.1, 0.2], id="too-narrow"),
         pytest.param([0.1] * 512, id="too-wide"),
+        # FluidAudio's own sentinel for an inactive speaker and for a missing
+        # model output (EmbeddingExtractor.swift:75 and :110). Well-formed, and
+        # it means extraction failed. Stored as a voice it can never match, so
+        # the person shows a profile in Preferences and is never recognised.
+        pytest.param([0.0] * 256, id="all-zero-failure-sentinel"),
+        pytest.param([float("nan")] + [0.1] * 255, id="contains-nan"),
+        pytest.param([float("inf")] + [0.1] * 255, id="contains-inf"),
     ])
     def test_a_malformed_embedding_costs_the_embedding_not_the_turn(
         self, helper_returning, embedding
@@ -204,6 +211,33 @@ class TestMalformedSegmentsDoNotCostTheTranscript:
             f"{embedding!r} reached the caller, which hands it to numpy"
         )
         assert result[0]["speaker"] == "SPEAKER_00"
+
+    def test_a_dropped_embedding_is_reported_as_its_own_kind_of_loss(
+        self, helper_returning, capsys
+    ):
+        """The stderr split the code argues for at length and nothing held.
+
+        A dropped embedding and a skipped segment cost different things: one
+        loses a voice sample, the other loses a turn. Deleting the counter and
+        its report left every test green while a meeting in which FluidAudio
+        emitted 200 unusable embeddings, so speaker memory did nothing at all,
+        produced no output whatsoever.
+        """
+        helper_returning({"segments": [
+            {"start": 0.0, "end": 1.0, "speaker": "A", "embedding": [0.0] * 256},
+            {"start": 1.0, "end": 2.0, "speaker": "B", "embedding": [0.1] * 256},
+        ]})
+        result = diarization._diarize_fluidaudio("meeting.wav", with_embeddings=True)
+
+        assert len(result) == 2, "no turn should have been lost here"
+        err = capsys.readouterr().err
+        assert "dropped 1 unusable embeddings" in err, (
+            f"the degradation was silent, stderr was {err!r}"
+        )
+        assert "skipped" not in err, (
+            "a dropped embedding was reported as a skipped segment, which "
+            "reports a degradation as a data loss"
+        )
 
     def test_one_bad_leading_embedding_cannot_discard_the_whole_meeting(
         self, helper_returning
