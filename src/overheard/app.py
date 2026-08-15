@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -355,15 +356,25 @@ class TranscriberApp(rumps.App):
         self._gather_poll_timer = None
         meta = self._pending_meeting_meta
         cal_name, source, cal_location, cal_attendees = meta
-        panel = self._ensure_details_panel()
-        self._set_state(IDLE, "Fill in details...")
-        panel.show(
-            name=cal_name,
-            source=source,
-            location=cal_location,
-            attendees=cal_attendees,
-            speaker_count=2,
-        )
+        # An rumps.Timer callback is an ObjC callback: an exception escaping
+        # here aborts the process below Python's own handlers, with no
+        # traceback. The recording is already on disk at this point, so
+        # reporting the failure and leaving it there beats taking the app down
+        # with the audio still unsaved to a transcript.
+        try:
+            panel = self._ensure_details_panel()
+            self._set_state(IDLE, "Fill in details...")
+            panel.show(
+                name=cal_name,
+                source=source,
+                location=cal_location,
+                attendees=cal_attendees,
+                speaker_count=2,
+            )
+        except Exception as e:
+            print(f"[overheard] could not open the details panel: {e}", file=sys.stderr)
+            traceback.print_exc()
+            self._set_state(IDLE, "Details panel failed, see the log")
 
     # ------------------------------------------------------------------
     # Details panel callback
@@ -486,10 +497,23 @@ class TranscriberApp(rumps.App):
             print(f"Popover hook failed: {e}", flush=True)
 
     def _open_preferences_cb(self):
+        """Open Preferences, reporting a failure rather than dying on one.
+
+        This is called straight from the gear button's ObjC action, through
+        _PopoverDelegate.openPreferences_. An exception escaping an action
+        callback aborts the process below Python's handlers, with no traceback
+        and no crash report, which is how three separate bugs hid behind "the
+        app vanishes" earlier on this branch. A window that fails to build has
+        to be a message, not an exit.
+        """
         from overheard.preferences import PreferencesWindow
-        if self._prefs_window is None:
-            self._prefs_window = PreferencesWindow()
-        self._prefs_window.show()
+        try:
+            if self._prefs_window is None:
+                self._prefs_window = PreferencesWindow()
+            self._prefs_window.show()
+        except Exception as e:
+            print(f"[overheard] could not open Preferences: {e}", file=sys.stderr)
+            traceback.print_exc()
 
     def _on_discard(self):
         """Discard the pending recording without transcribing."""

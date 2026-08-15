@@ -100,24 +100,53 @@ def warm_package(tmp_path, monkeypatch):
 
 
 def test_resampling_imports_nothing():
-    """The exact call that killed the app, with imports made fatal."""
+    """The exact call that killed the app, with imports made fatal.
+
+    Asserts on ``attempted`` as well as relying on the raise. An import wrapped
+    in try/except swallows the AssertionError, so the call returns cleanly
+    while the disk hit and the stall still happen in production. That shape is
+    not contrived: it is how an optional accelerated backend is normally
+    probed, and it is what numpy and scipy do internally for the very lazy
+    submodules this file blames for the SIGTRAP.
+    """
     audio = np.zeros(4800, dtype=np.float32)
-    with NoImportsAllowed():
+    with NoImportsAllowed() as guard:
         out = live._resample(audio, 48000)
+    assert guard.attempted == [], f"first-time imports on the audio path: {guard.attempted}"
     assert len(out) == 1600, "48k to 16k should be a third of the samples"
 
 
 def test_resampling_at_the_target_rate_imports_nothing():
     audio = np.zeros(1600, dtype=np.float32)
-    with NoImportsAllowed():
+    with NoImportsAllowed() as guard:
         assert live._resample(audio, live.TARGET_RATE) is audio
+    assert guard.attempted == [], f"first-time imports on the audio path: {guard.attempted}"
 
 
 def test_downmixing_imports_nothing():
     """_to_mono runs on the same thread, immediately before _resample."""
     block = np.zeros((512, 2), dtype=np.float32)
-    with NoImportsAllowed():
+    with NoImportsAllowed() as guard:
         live._to_mono(block, {"mic_channel": 0, "system_channels": [1]})
+    assert guard.attempted == [], f"first-time imports on the audio path: {guard.attempted}"
+
+
+def test_a_swallowed_import_is_still_recorded(warm_package):
+    """The raise alone is not enough, so the recording has to be trustworthy.
+
+    A hot-path function that catches its own ImportError would sail through a
+    guard that signals only by raising. Recording every attempt is what lets
+    the tests above catch that, so this pins the recording itself.
+    """
+    with NoImportsAllowed() as guard:
+        try:
+            importlib.import_module("coldpkg.sub")
+        except Exception:
+            pass
+    assert guard.attempted == ["coldpkg.sub"], (
+        "a swallowed violation must still be recorded, or the hot-path tests "
+        "above cannot see it"
+    )
 
 
 def test_the_resampler_is_bound_at_module_scope():

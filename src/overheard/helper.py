@@ -76,12 +76,40 @@ FLUIDAUDIO_MODELS = (
     Path.home() / "Library" / "Application Support" / "FluidAudio" / "Models"
 )
 
-#: The compiled CoreML bundles diarization cannot run without. FluidAudio ships
-#: these as .mlmodelc directories rather than as single files.
+#: Copied from FluidAudio's ModelNames.OfflineDiarizer.requiredModels, which is
+#: the set OfflineDiarizerModels.load() hard-fails without. The helper calls
+#: exactly that (DiarizeCommand.swift), so anything short of the full list is a
+#: download that cannot diarize. Naming only two of them reported "Installed"
+#: with the other three missing.
 _REQUIRED_DIARIZATION_MODELS = (
-    "speaker-diarization/Segmentation.mlmodelc",
-    "speaker-diarization/Embedding.mlmodelc",
+    "Segmentation.mlmodelc",
+    "FBank.mlmodelc",
+    "Embedding.mlmodelc",
+    "PldaRho.mlmodelc",
+    "plda-parameters.json",
 )
+
+#: FluidAudio itself probes several names for this folder, so it has moved
+#: before and expects to again. Matching a pattern rather than one literal
+#: keeps a rename from making the Download button permanently useless: the
+#: label would read Missing, the helper would find everything and return in
+#: under a second, and the label would go straight back to Missing.
+_DIARIZATION_SUBDIR_GLOB = "speaker-diarization*"
+
+
+def _bundle_has_weights(bundle: Path) -> bool:
+    """True when a compiled CoreML bundle holds actual weights.
+
+    A .mlmodelc is a directory. "Not empty" is not enough: a partial download
+    leaves analytics/coremldata.bin and metadata.json in place with no weights
+    at all, which is the same directory-is-not-empty lie one level down. The
+    weights live at weights/weight.bin, or model<N>/weights/<N>-weight.bin for
+    multi-function models, so both shapes are matched.
+    """
+    return any(
+        candidate.is_file() and candidate.stat().st_size > 0
+        for candidate in bundle.glob("**/weights/*.bin")
+    )
 
 
 def diarization_models_present() -> bool:
@@ -91,15 +119,26 @@ def diarization_models_present() -> bool:
     for them is what lets Preferences say whether a download is actually
     pending, rather than asserting one always is.
 
-    The previous test was "the Models directory exists and is not empty", which
-    is the same lie is_model_cached was rewritten to stop telling: a download
-    interrupted early leaves the directory created with a config.json in it and
-    no weights, Preferences reports the models installed, and the user finds
-    out at the end of a meeting. This names the bundles instead. They are
-    directories, so an empty one is a download that did not finish.
+    The original test was "the Models directory exists and is not empty", which
+    is the lie is_model_cached was rewritten to stop telling: a download
+    interrupted early leaves the folder created with a config.json in it,
+    Preferences reports the models installed, and the user finds out at the end
+    of a meeting. This requires every artefact FluidAudio declares mandatory,
+    and requires each compiled bundle to actually contain weights.
     """
-    def is_populated(relative: str) -> bool:
-        bundle = FLUIDAUDIO_MODELS / relative
-        return bundle.is_dir() and any(bundle.iterdir())
+    if not FLUIDAUDIO_MODELS.is_dir():
+        return False
 
-    return all(is_populated(name) for name in _REQUIRED_DIARIZATION_MODELS)
+    for parent in sorted(FLUIDAUDIO_MODELS.glob(_DIARIZATION_SUBDIR_GLOB)):
+        if not parent.is_dir():
+            continue
+        if all(_present(parent / name) for name in _REQUIRED_DIARIZATION_MODELS):
+            return True
+    return False
+
+
+def _present(artefact: Path) -> bool:
+    """A compiled bundle with weights in it, or a non-empty plain file."""
+    if artefact.name.endswith(".mlmodelc"):
+        return artefact.is_dir() and _bundle_has_weights(artefact)
+    return artefact.is_file() and artefact.stat().st_size > 0

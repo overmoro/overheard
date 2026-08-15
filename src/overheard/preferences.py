@@ -25,7 +25,7 @@ from AppKit import (
     NSOpenPanel,
     NSView,
 )
-from Foundation import NSObject
+from Foundation import NSObject, NSThread
 
 from overheard import config as cfg
 from overheard.audio import create_aggregate_device, create_multi_output_device
@@ -113,8 +113,19 @@ def _set_label(label, text: str) -> None:
     The download and device-creation workers run on daemon threads. Mutating an
     NSTextField from one is undefined behaviour, and this app has already died
     once from an exception crossing the ObjC boundary with no crash report, so
-    the write is handed to the main thread rather than done in place.
+    a worker's write is handed to the main thread instead.
+
+    On the main thread the write happens in place. Marshalling unconditionally
+    would queue even the main thread's own writes to a later run-loop pass, and
+    since _build no longer paints the status labels, show() would order the
+    window front with all three of them blank and fill them in a frame or more
+    later. Longer than a frame if the click arrived during a tracking loop,
+    because an asynchronous perform is only delivered in the default run-loop
+    mode.
     """
+    if NSThread.isMainThread():
+        label.setStringValue_(text)
+        return
     label.performSelectorOnMainThread_withObject_waitUntilDone_(
         "setStringValue:", text, False
     )
@@ -131,6 +142,9 @@ class _PreferencesDelegate(NSObject):
         # every path can read it without a getattr default standing in for an
         # invariant that is supposed to hold.
         self._downloading = False
+        # Incremented per download, so a finishing worker can tell whether the
+        # latch it is about to release is still its own.
+        self._download_generation = 0
         return self
 
     # ---- General -----------------------------------------------------------
@@ -196,30 +210,58 @@ class _PreferencesDelegate(NSObject):
         into AppKit's dispatch and abort the process without a traceback,
         which is a worse outcome than a stale label.
         """
-        try:
-            if self._downloading:
-                # A running download owns this label and publishes its own
-                # progress. Overwriting it would report "Missing" over a live
-                # download and invite the user to start a second one.
-                pass
-            else:
-                _set_label(self._deps_status, _model_status())
+        # A running download owns the dependency label and publishes its own
+        # progress, so it is skipped entirely: overwriting it would report
+        # "Missing" over a live download and invite a second one. Skipped on
+        # the failure path too, which a single shared handler got wrong by
+        # putting an unrelated widget's error onto this label.
+        if not self._downloading:
+            self._recompute(
+                self._deps_status, _model_status, "Model status unavailable"
+            )
 
-            _set_label(self._aggregate_status, _device_exists("Meeting Capture"))
-            _set_label(self._multiout_status, _device_exists("Meeting Monitor"))
+        self._recompute(
+            self._aggregate_status,
+            lambda: _device_exists("Meeting Capture"),
+            "Device status unavailable",
+        )
+        self._recompute(
+            self._multiout_status,
+            lambda: _device_exists("Meeting Monitor"),
+            "Device status unavailable",
+        )
+        self._recompute_speakers()
+
+    @objc.python_method
+    def _recompute(self, label, produce, on_failure: str) -> None:
+        """Write one label, and let a failure cost only that label.
+
+        One try around the whole refresh meant the first failure abandoned
+        every recompute after it. Since _build no longer paints these, an
+        abandoned label renders empty rather than stale, on that open and on
+        every open after, because the same exception recurs.
+        """
+        try:
+            _set_label(label, produce())
+        except Exception as e:
+            print(
+                f"[overheard] could not refresh a Preferences label: {e}",
+                file=sys.stderr,
+            )
+            try:
+                _set_label(label, on_failure)
+            except Exception:
+                pass
+
+    def _recompute_speakers(self) -> None:
+        """The speaker popup is several widgets, so it gets its own guard."""
+        try:
             self._refresh_speakers()
         except Exception as e:
             print(
-                f"[overheard] could not refresh the Preferences status: {e}",
+                f"[overheard] could not reload the known voices: {e}",
                 file=sys.stderr,
             )
-            # Say so on the pane rather than leaving whatever was there. These
-            # labels are the only writer now, so silence would read as a
-            # deliberate blank rather than as a failure.
-            try:
-                _set_label(self._deps_status, "Status unavailable, see the log")
-            except Exception:
-                pass
 
     def toggleLivePreview_(self, sender):
         cfg.set_value("live_preview", bool(sender.state()))
@@ -271,10 +313,47 @@ class _PreferencesDelegate(NSObject):
         if self._downloading:
             return
         self._downloading = True
+        self._download_generation += 1
         self._deps_status.setStringValue_("Downloading... (this may take several minutes)")
-        threading.Thread(target=self._do_download_models, daemon=True).start()
+        generation = self._download_generation
+        threading.Thread(
+            target=self._do_download_models, args=(generation,), daemon=True
+        ).start()
 
-    def _do_download_models(self):
+    def releaseDownload_(self, generation):
+        """Clear the latch, but only if this download still owns it.
+
+        Runs on the main thread, after the label has been written, so the latch
+        never clears while the pane still reads "Downloading...". Clearing it
+        on the worker before queuing the refresh left a window in which the
+        button was live and the label still said a download was running, which
+        is exactly when a user clicks again.
+
+        The generation check stops a finishing worker from releasing a latch
+        that a later download has since taken.
+        """
+        if generation == self._download_generation:
+            self._downloading = False
+
+    @objc.python_method
+    def _finish_download(self, generation) -> None:
+        """Release the latch on the main thread, ordered after the label.
+
+        Direct when already on the main thread, for the same reason _set_label
+        is: an asynchronous perform would queue to a later run-loop pass, and
+        the caller would return with the latch still set.
+        """
+        if NSThread.isMainThread():
+            self.releaseDownload_(generation)
+            return
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "releaseDownload:", generation, False
+        )
+
+    @objc.python_method
+    def _do_download_models(self, generation=None):
+        if generation is None:
+            generation = self._download_generation
         try:
             _set_label(self._deps_status, "Downloading Parakeet TDT v3...")
             from overheard.asr import PARAKEET_MODEL
@@ -309,20 +388,23 @@ class _PreferencesDelegate(NSObject):
                     )
                     return
 
-            # Cleared before the refresh, so refresh_status is free to write
-            # the finished state rather than skipping the label it owns.
-            self._downloading = False
+            # Released on the main thread, queued before the refresh so the
+            # latch outlives the "Downloading..." text rather than clearing
+            # while the pane still shows it.
+            self._finish_download(generation)
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "refreshStatusOnMain:", None, False
             )
+            return
         except subprocess.TimeoutExpired:
             _set_label(self._deps_status, "✗ Download timed out")
         except Exception as e:
             _set_label(self._deps_status, f"✗ {e}")
         finally:
-            # Every early return above leaves the latch set otherwise, and a
-            # download that failed must not block the retry.
-            self._downloading = False
+            # Every failure path lands here, and a download that failed must
+            # not block the retry. The success path returned above, having
+            # already handed its release to the main thread.
+            self._finish_download(generation)
 
     # ---- Output Folder -----------------------------------------------------
 
@@ -454,24 +536,28 @@ class PreferencesWindow:
 
     def __init__(self):
         self._window: Any = None
-        # Built lazily by _build, which assigns _window several lines before
-        # this, so an exception in between leaves a window with no delegate.
-        # _ensure_built is what keeps show() off that path.
         self._delegate: "_PreferencesDelegate | None" = None
+        # Set as the very last statement of _build, so it means "_build ran to
+        # completion" and nothing weaker. Keying on _window or on _delegate
+        # instead means keying on a value assigned in the first few lines of a
+        # method that then runs for another hundred and forty: a failure past
+        # that point leaves the panel believing it is built, forever, and
+        # every later open dies on a widget the build never got to.
+        self._built = False
 
     def _ensure_built(self) -> "_PreferencesDelegate":
         """Build on first use and hand back the delegate show() needs.
 
-        Keyed on the delegate rather than on the window. _build assigns
-        _window first, so a failure after that point used to leave _window set
-        and _delegate None, and every later click on the gear then raised
-        AttributeError on None inside an ObjC action callback, which aborts
-        the process with no crash report.
+        Retries on every call until a build finishes, because a partially
+        built panel is not a panel. Raising here rather than returning a
+        half-populated delegate keeps the AttributeError-inside-AppKit failure
+        off the table; the caller at the ObjC boundary is what turns this into
+        a message instead of an abort.
         """
-        if self._delegate is None:
+        if not self._built:
             self._build()
         delegate = self._delegate
-        if delegate is None:
+        if not self._built or delegate is None:
             raise RuntimeError("the preferences window failed to build")
         return delegate
 
@@ -736,3 +822,7 @@ class PreferencesWindow:
         pane.addSubview_(local_speaker_field)
         self._delegate._local_speaker_field = local_speaker_field
         pane.addSubview_(_make_label("(mic attribution)", 300, y, 130, 20))
+
+        # Last statement in the method, deliberately. Anything above can fail,
+        # and until this runs the panel is not built.
+        self._built = True

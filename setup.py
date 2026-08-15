@@ -57,9 +57,20 @@ OPTIONS = {
         # Large ML packages live in system site-packages; not bundled.
         # They are resolved at runtime via semi_standalone mode.
         #
-        # torch, torchaudio, whisperx and pyannote were listed here until the
-        # single-engine cut. Nothing imports them now, so naming them would
-        # describe a dependency the app no longer has.
+        # This list is an instruction to py2app's modulegraph, not a record of
+        # what the app imports. modulegraph follows transitive and
+        # conditionally-guarded imports and does not understand a runtime
+        # `if is_available()`, so a name belongs here whenever a dependency
+        # edge could reach it, whether or not first-party code imports it.
+        # torch and friends stayed installed in this environment after the
+        # single-engine cut removed every first-party import of them, so
+        # dropping them from this list would let any surviving edge pull them
+        # into the bundle. Remove them only after a clean build_app.sh run
+        # shows the bundle contents unchanged.
+        "torch",
+        "torchaudio",
+        "whisperx",
+        "pyannote",
         "transformers",
         "huggingface_hub",
     ],

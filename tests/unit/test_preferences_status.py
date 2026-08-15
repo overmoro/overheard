@@ -138,15 +138,49 @@ class TestDownloadLatch:
 
 
 class TestThreadSafety:
-    def test_worker_label_writes_are_marshalled_to_the_main_thread(self, delegate):
+    def test_a_worker_thread_write_is_marshalled(self, delegate):
         """Mutating an NSTextField off the main thread is undefined behaviour.
 
         The workers run on daemon threads, and this app has already died once
-        from an exception crossing the ObjC boundary with no crash report.
+        from an exception crossing the ObjC boundary with no crash report. This
+        runs on a real thread rather than asserting the branch, because the
+        branch is the thing under test.
         """
-        preferences._set_label(delegate._deps_status, "from a worker")
+        import threading
+
+        done = threading.Event()
+
+        def worker():
+            preferences._set_label(delegate._deps_status, "from a worker")
+            done.set()
+
+        threading.Thread(target=worker, daemon=True).start()
+        assert done.wait(timeout=5), "the worker never finished"
         assert delegate._deps_status.marshalled_writes == 1
         assert delegate._deps_status.direct_writes == 0
+
+    def test_a_main_thread_write_is_immediate(self, delegate):
+        """Queueing the main thread's own writes leaves the window blank.
+
+        show() calls refresh_status and then orders the window front. Since
+        _build no longer paints these labels, marshalling unconditionally would
+        put an empty pane on screen and fill it a run-loop pass later, or
+        longer if the click arrived during a tracking loop.
+        """
+        preferences._set_label(delegate._deps_status, "on the main thread")
+        assert delegate._deps_status.direct_writes == 1
+        assert delegate._deps_status.marshalled_writes == 0
+        assert delegate._deps_status.value == "on the main thread"
+
+    def test_refresh_status_leaves_no_label_empty(self, delegate):
+        """The first open must not show three blank labels.
+
+        _build stopped painting them when refresh_status became the single
+        writer, so this pins the property that made that safe.
+        """
+        delegate.refresh_status()
+        for name in ("_deps_status", "_aggregate_status", "_multiout_status"):
+            assert getattr(delegate, name).value != "", f"{name} was left blank"
 
     def test_the_worker_can_ask_for_a_refresh_on_the_main_thread(self, delegate):
         """The selector has to exist, or the request is silently a no-op."""

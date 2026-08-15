@@ -212,26 +212,28 @@ class DetailsPanel:
         self._callback = callback
         self._discard_callback = discard_callback
         self._window: Any = None
-        # Built lazily by _build. Optional is the honest type here, because
-        # _build can raise partway and leave the window set with these still
-        # None; _ensure_built below is what makes that state unreachable from
-        # show().
         self._delegate: "_DetailsDelegate | None" = None
         self._data_source: "_AttendeeDataSource | None" = None
+        # Set as the very last statement of _build, so it means "_build ran to
+        # completion" and nothing weaker. _window and _delegate are both
+        # assigned in its first few lines and it runs for another hundred and
+        # more, so keying on either lets a failure past that point leave the
+        # panel believing it is built. Every later show() then dies on a widget
+        # the build never reached, permanently.
+        self._built = False
 
     def _ensure_built(self) -> "tuple[_DetailsDelegate, _AttendeeDataSource]":
         """Build on first use, and hand back the two objects show() needs.
 
-        Keying on the delegate rather than on the window is deliberate. _build
-        assigns _window first, so an exception raised after that point left a
-        window in place and a None delegate, and every later show() then died
-        on an attribute of None inside an AppKit action callback, which aborts
-        the process without a traceback.
+        Retries on every call until a build finishes, because a partially built
+        panel is not a panel. Raising rather than returning a half-populated
+        delegate keeps the AttributeError-inside-AppKit failure off the table;
+        the caller at the ObjC boundary turns this into a message.
         """
-        if self._delegate is None or self._data_source is None:
+        if not self._built:
             self._build()
         delegate, data_source = self._delegate, self._data_source
-        if delegate is None or data_source is None:
+        if not self._built or delegate is None or data_source is None:
             raise RuntimeError("the details panel failed to build")
         return delegate, data_source
 
@@ -382,3 +384,7 @@ class DetailsPanel:
         btn.setTarget_(self._delegate)
         btn.setAction_("onStartTranscription:")
         cv.addSubview_(btn)
+
+        # Last statement in the method, deliberately. Anything above can fail,
+        # and until this runs the panel is not built.
+        self._built = True

@@ -524,9 +524,6 @@ class TransportPopover:
             self.set_levels(0.0, 0.0)
 
     def set_levels(self, mic_rms, sys_rms):
-        if not self._mic_bar:
-            return
-
         def _db(rms):
             if rms <= 0:
                 return 0.0
@@ -534,7 +531,7 @@ class TransportPopover:
             return max(0.0, min(1.0, (db + 60) / 60))
 
         self._mic_bar.setLevel_(_db(mic_rms))
-        if self._is_multichannel and self._sys_bar:
+        if self._is_multichannel:
             self._sys_bar.setLevel_(_db(sys_rms))
 
     def configure_channels(self, is_multichannel):
@@ -547,8 +544,13 @@ class TransportPopover:
     # ------------------------------------------------------------------
 
     def _set_meters_visible(self, v):
-        if self._mic_bar: self._mic_bar.setActive_(v)
-        if self._sys_bar: self._sys_bar.setActive_(v and self._is_multichannel)
+        # No falsiness guards on the bars: they are declared non-Optional
+        # because _build always assigns them, and an NSView subclass is always
+        # truthy anyway, so the guards could never fire. Keeping them would
+        # have the code hedging against a case the annotation says cannot
+        # happen, leaving the next reader to decide which to believe.
+        self._mic_bar.setActive_(v)
+        self._sys_bar.setActive_(v and self._is_multichannel)
         if self._sys_row: self._sys_row.setHidden_(not self._is_multichannel)
 
     def _build(self, callbacks):

@@ -27,22 +27,40 @@ def models_dir(tmp_path, monkeypatch):
     return root
 
 
-def _install(root, *, segmentation=True, embedding=True, populated=True):
-    """Lay out the compiled bundles the way FluidAudio does.
+#: FluidAudio's ModelNames.OfflineDiarizer.requiredModels, which is what
+#: OfflineDiarizerModels.load() hard-fails without. Named here so a test that
+#: omits one is obviously omitting one.
+BUNDLES = (
+    "Segmentation.mlmodelc",
+    "FBank.mlmodelc",
+    "Embedding.mlmodelc",
+    "PldaRho.mlmodelc",
+)
+PLDA = "plda-parameters.json"
 
-    They are .mlmodelc directories, not files, so "created but empty" is a real
-    intermediate state rather than a contrived one.
+
+def _install(root, *, bundles=BUNDLES, plda=True, weights=True,
+             subdir="speaker-diarization"):
+    """Lay out the compiled models the way FluidAudio does.
+
+    The bundles are .mlmodelc directories holding weights/weight.bin, so both
+    "created but empty" and "created with metadata but no weights" are real
+    intermediate states of an interrupted download rather than contrived ones.
     """
-    wanted = []
-    if segmentation:
-        wanted.append("Segmentation.mlmodelc")
-    if embedding:
-        wanted.append("Embedding.mlmodelc")
-    for name in wanted:
-        bundle = root / "speaker-diarization" / name
-        bundle.mkdir(parents=True)
-        if populated:
-            (bundle / "coremldata.bin").write_bytes(b"\x00" * 16)
+    parent = root / subdir
+    for name in bundles:
+        bundle = parent / name
+        bundle.mkdir(parents=True, exist_ok=True)
+        # Written first by a real download, and on its own it proves nothing.
+        (bundle / "metadata.json").write_text("{}")
+        (bundle / "analytics").mkdir(exist_ok=True)
+        (bundle / "analytics" / "coremldata.bin").write_bytes(b"\x00" * 8)
+        if weights:
+            (bundle / "weights").mkdir(exist_ok=True)
+            (bundle / "weights" / "weight.bin").write_bytes(b"\x00" * 64)
+    if plda:
+        parent.mkdir(parents=True, exist_ok=True)
+        (parent / PLDA).write_text("{}")
 
 
 def test_a_complete_install_is_present(models_dir):
@@ -57,29 +75,61 @@ def test_nothing_downloaded_is_absent(models_dir):
 def test_a_config_file_alone_does_not_count(models_dir):
     """The exact interrupted-download shape: small files land first.
 
-    Under the old check this returned True, and Preferences said the speaker
-    models were installed with none of them on disk.
+    Under the original check this returned True, and Preferences said the
+    speaker models were installed with none of them on disk.
     """
     (models_dir / "speaker-diarization").mkdir()
     (models_dir / "speaker-diarization" / "config.json").write_text("{}")
     assert helper.diarization_models_present() is False
 
 
-def test_an_empty_bundle_directory_does_not_count(models_dir):
-    """A .mlmodelc created but never filled is an unfinished download."""
-    _install(models_dir, populated=False)
+def test_bundles_without_weights_do_not_count(models_dir):
+    """Metadata lands before weights, so a bundle can exist and be useless.
+
+    "The .mlmodelc directory is not empty" is the same lie as "the Models
+    directory is not empty", one level down.
+    """
+    _install(models_dir, weights=False)
     assert helper.diarization_models_present() is False
 
 
-@pytest.mark.parametrize("missing", ["segmentation", "embedding"])
-def test_one_model_without_the_other_is_absent(models_dir, missing):
-    """Diarization needs both, so either one missing means not installed."""
-    _install(
-        models_dir,
-        segmentation=(missing != "segmentation"),
-        embedding=(missing != "embedding"),
-    )
+@pytest.mark.parametrize("missing", BUNDLES)
+def test_any_single_missing_bundle_is_absent(models_dir, missing):
+    """load() hard-fails without any one of them, so all four are required.
+
+    Parametrised over FluidAudio's own list rather than spot-checking two, so
+    adding a model to that tuple automatically demands a case for it.
+    """
+    _install(models_dir, bundles=[b for b in BUNDLES if b != missing])
     assert helper.diarization_models_present() is False
+
+
+def test_the_plda_parameters_file_is_required(models_dir):
+    """It is a plain file rather than a bundle, and load() needs it too."""
+    _install(models_dir, plda=False)
+    assert helper.diarization_models_present() is False
+
+
+def test_an_empty_plda_file_does_not_count(models_dir):
+    """A created-but-unwritten file is an unfinished download."""
+    _install(models_dir)
+    (models_dir / "speaker-diarization" / PLDA).write_text("")
+    assert helper.diarization_models_present() is False
+
+
+@pytest.mark.parametrize(
+    "subdir",
+    ["speaker-diarization", "speaker-diarization-coreml", "speaker-diarization-offline"],
+)
+def test_the_folder_name_upstream_probes_for_are_all_accepted(models_dir, subdir):
+    """FluidAudio itself tries three names, so it has moved this before.
+
+    Naming one literal would mean a rename leaves the label reading Missing
+    while the helper finds everything and returns in under a second: a Download
+    button that completes instantly, changes nothing, and never stops asking.
+    """
+    _install(models_dir, subdir=subdir)
+    assert helper.diarization_models_present() is True
 
 
 def test_the_check_does_not_read_the_real_machine(models_dir):
