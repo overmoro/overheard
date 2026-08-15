@@ -70,12 +70,36 @@ def capture_available() -> tuple[bool, str]:
     return True, ""
 
 
+#: Where the helper downloads FluidAudio's compiled models. Module level so a
+#: test can point it somewhere hermetic instead of reading the real machine.
+FLUIDAUDIO_MODELS = (
+    Path.home() / "Library" / "Application Support" / "FluidAudio" / "Models"
+)
+
+#: The compiled CoreML bundles diarization cannot run without. FluidAudio ships
+#: these as .mlmodelc directories rather than as single files.
+_REQUIRED_DIARIZATION_MODELS = (
+    "speaker-diarization/Segmentation.mlmodelc",
+    "speaker-diarization/Embedding.mlmodelc",
+)
+
+
 def diarization_models_present() -> bool:
-    """True when FluidAudio has already fetched its speaker models.
+    """True when FluidAudio has the compiled models diarization needs.
 
     The helper downloads these on first use into Application Support. Checking
     for them is what lets Preferences say whether a download is actually
     pending, rather than asserting one always is.
+
+    The previous test was "the Models directory exists and is not empty", which
+    is the same lie is_model_cached was rewritten to stop telling: a download
+    interrupted early leaves the directory created with a config.json in it and
+    no weights, Preferences reports the models installed, and the user finds
+    out at the end of a meeting. This names the bundles instead. They are
+    directories, so an empty one is a download that did not finish.
     """
-    models = Path.home() / "Library" / "Application Support" / "FluidAudio" / "Models"
-    return models.is_dir() and any(models.iterdir())
+    def is_populated(relative: str) -> bool:
+        bundle = FLUIDAUDIO_MODELS / relative
+        return bundle.is_dir() and any(bundle.iterdir())
+
+    return all(is_populated(name) for name in _REQUIRED_DIARIZATION_MODELS)
