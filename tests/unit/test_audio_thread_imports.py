@@ -16,8 +16,10 @@ it, so a new lazy import anywhere on the hot path is caught the same way.
 """
 
 import importlib
+import queue
 import sys
 import textwrap
+import threading
 
 import numpy as np
 import pytest
@@ -129,6 +131,43 @@ def test_downmixing_imports_nothing():
     with NoImportsAllowed() as guard:
         live._to_mono(block, {"mic_channel": 0, "system_channels": [1]})
     assert guard.attempted == [], f"first-time imports on the audio path: {guard.attempted}"
+
+
+def test_the_registered_tap_callback_imports_nothing():
+    """The function actually wired to the recorder, not just its helpers.
+
+    app.py does recorder.set_tap(live.feed), so LiveTranscriber.feed is what
+    runs on the capture thread for every block. Its whole body sits inside
+    `except Exception`, which catches AssertionError, so a guard that signals
+    only by raising is invisible here: the import would happen, the stall would
+    happen, and the test would pass. Asserting on attempted is the only signal
+    that survives.
+
+    The other tests in this file exercise _resample and _to_mono, which feed
+    calls. This exercises feed itself, so a lazy import added anywhere along
+    that chain, including in _record_energy or _enqueue, is caught.
+    """
+    transcriber = live.LiveTranscriber.__new__(live.LiveTranscriber)
+    transcriber.sample_rate = 48000
+    transcriber.channels_info = {"mic_channel": 0, "system_channels": [1]}
+    transcriber._stop_event = threading.Event()
+    transcriber._queue = queue.Queue(maxsize=8)
+    transcriber._lock = threading.Lock()
+    transcriber._pending = np.zeros(0, dtype=np.float32)
+    transcriber._chunk_frames = 16000
+    transcriber.diarizer = None
+    transcriber._energy = []
+    transcriber._t0 = 0.0
+
+    block = np.zeros((4800, 2), dtype=np.float32)
+    with NoImportsAllowed() as guard:
+        transcriber.feed(block)
+
+    assert guard.attempted == [], (
+        "first-time imports on the registered tap callback: "
+        f"{guard.attempted}. feed() swallows AssertionError, so this "
+        "assertion is the only thing that can see them."
+    )
 
 
 def test_a_swallowed_import_is_still_recorded(warm_package):

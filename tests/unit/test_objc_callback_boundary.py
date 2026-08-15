@@ -110,3 +110,106 @@ class TestDetailsPanelTimer:
         assert instance._pending_wav == "/tmp/recording.wav", (
             "the pending recording must survive a panel failure"
         )
+
+
+class TestFirstPartyObjCMethodsAreGuarded:
+    """rumps guards its own callbacks; it does not guard ours.
+
+    rumps wraps every menu item and Timer it dispatches in try/except
+    (rumps.py:730 and :997), so those two surfaces were already safe. The
+    first-party NSObject and NSView subclasses had nothing, and they are the
+    larger surface: mouse events, actions and drawRect_ on _PillButton,
+    _LevelBar, _DragHeader and four delegates.
+    """
+
+    def test_a_failing_transport_callback_does_not_escape_mousedown(self, capsys):
+        """The worst case in the app: Stop, with the recording still in RAM.
+
+        _PillButton.mouseDown_ calls the transport callback directly. That
+        callback is _on_stop, which calls TapRecorder.stop, where proc.wait
+        after a kill and np.concatenate over the accumulated chunks can both
+        raise. The chunks ARE the meeting, and they have not been written to
+        disk yet, so an abort here loses the recording outright.
+        """
+        from overheard import popover
+
+        exploded = []
+
+        def callback():
+            exploded.append(True)
+            raise MemoryError("np.concatenate over 2.7 GB of chunks")
+
+        button = popover._PillButton.alloc().initWithIcon_label_color_callback_(
+            "●", "Stop", None, callback
+        )
+        button.mouseDown_(None)          # must not raise
+
+        assert exploded, "the callback should still have been attempted"
+        assert "failed" in capsys.readouterr().err
+
+    def test_a_failing_drawrect_does_not_escape(self, capsys):
+        """drawRect_ is where the original SIGTRAP came from.
+
+        An exception raised inside AppKit's drawing machinery aborts the
+        process. The class-level defaults stop the known case, but the guard is
+        what makes the next one survivable.
+        """
+        from AppKit import NSMakeRect
+        from overheard import popover
+
+        bar = popover._LevelBar.alloc().initWithFrame_(NSMakeRect(0, 0, 10, 10))
+        # Stand in for any attribute drawRect_ reads that is not there, which
+        # is the shape of the original crash.
+        bar._active = True
+        bar._level = object()    # multiplying this raises inside the draw
+
+        bar.drawRect_(bar.bounds())   # must not raise
+
+        assert "failed" in capsys.readouterr().err
+
+    def test_every_appkit_dispatched_delegate_action_is_guarded(self):
+        """Derived, so a new action is covered without anyone remembering.
+
+        Guarding by hand means guarding the ones somebody thought of, which is
+        how the transport buttons stayed exposed while two callbacks that rumps
+        already covered got guards.
+        """
+        import inspect
+        from overheard import details_panel, live_panel, popover, preferences
+
+        # Methods AppKit dispatches that carry a user action or an event.
+        # Excluded by design: init* (they must return self), the table data
+        # source methods (they must return typed values, so a guard returning
+        # None would break the table), and our own setters.
+        prefixes = ("on", "toggle", "browse", "save", "open", "quit", "create",
+                    "download", "connect", "forget", "show", "mouse", "draw",
+                    "refresh", "release", "select")
+        skip = {"initWithFrame_", "initWithCallbacks_", "initWithWindow_",
+                "initWithPanel_", "initWithIcon_label_color_callback_",
+                "initWithCallback_discardCallback_", "setLevel_", "setActive_",
+                "setEnabled_", "setRows_"}
+
+        unguarded = []
+        for module in (popover, preferences, details_panel, live_panel):
+            for _, cls in inspect.getmembers(module, inspect.isclass):
+                if cls.__module__ != module.__name__:
+                    continue
+                for name, fn in vars(cls).items():
+                    if not name.endswith("_") or name in skip:
+                        continue
+                    if not any(name.lower().startswith(p) for p in prefixes):
+                        continue
+                    # PyObjC replaces the function with a selector object and
+                    # keeps the original on .callable, so the decorator's
+                    # __wrapped__ marker lives there rather than on the
+                    # attribute itself.
+                    underlying = getattr(fn, "callable", fn)
+                    if not callable(underlying):
+                        continue
+                    if getattr(underlying, "__wrapped__", None) is None:
+                        unguarded.append(f"{module.__name__}.{cls.__name__}.{name}")
+
+        assert not unguarded, (
+            "these AppKit-dispatched methods have no objc_safe guard, so an "
+            f"exception in one aborts the process with no traceback: {unguarded}"
+        )

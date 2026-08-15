@@ -135,3 +135,24 @@ def test_the_folder_name_upstream_probes_for_are_all_accepted(models_dir, subdir
 def test_the_check_does_not_read_the_real_machine(models_dir):
     """The path is overridable, which is what makes the cases above hermetic."""
     assert helper.FLUIDAUDIO_MODELS == models_dir
+
+
+def test_a_stale_sibling_cannot_vouch_for_the_live_folder(models_dir):
+    """FluidAudio loads from exactly one path, so only that one can answer.
+
+    ModelHub resolves the diarizer to directory/Repo.diarizer.folderName, which
+    is speaker-diarization-coreml. A machine carrying a complete legacy
+    speaker-diarization/ next to a half-downloaded speaker-diarization-coreml/
+    would otherwise report Installed while the folder the helper actually loads
+    is incomplete, and the download would surprise the user mid-meeting.
+    """
+    _install(models_dir, subdir="speaker-diarization")                    # complete legacy
+    _install(models_dir, subdir="speaker-diarization-coreml", weights=False)  # live, partial
+    assert helper.diarization_models_present() is False
+
+
+def test_the_live_folder_answers_when_it_is_complete(models_dir):
+    """The converse, so the rule is pinned in both directions."""
+    _install(models_dir, subdir="speaker-diarization", weights=False)   # legacy, partial
+    _install(models_dir, subdir="speaker-diarization-coreml")           # live, complete
+    assert helper.diarization_models_present() is True

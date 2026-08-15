@@ -25,10 +25,11 @@ from AppKit import (
     NSOpenPanel,
     NSView,
 )
-from Foundation import NSObject, NSThread
+from Foundation import NSObject, NSRunLoopCommonModes, NSThread
 
 from overheard import config as cfg
 from overheard.audio import create_aggregate_device, create_multi_output_device
+from overheard.objc_safety import objc_safe
 from typing import Any
 
 # Window dimensions
@@ -119,15 +120,27 @@ def _set_label(label, text: str) -> None:
     would queue even the main thread's own writes to a later run-loop pass, and
     since _build no longer paints the status labels, show() would order the
     window front with all three of them blank and fill them in a frame or more
-    later. Longer than a frame if the click arrived during a tracking loop,
-    because an asynchronous perform is only delivered in the default run-loop
-    mode.
+    later.
     """
     if NSThread.isMainThread():
         label.setStringValue_(text)
         return
-    label.performSelectorOnMainThread_withObject_waitUntilDone_(
-        "setStringValue:", text, False
+    _perform_on_main(label, "setStringValue:", text)
+
+
+def _perform_on_main(target, selector: str, argument) -> None:
+    """Queue a selector on the main thread, in every run-loop mode.
+
+    The plain asynchronous perform schedules in NSDefaultRunLoopMode only, so
+    anything it delivers is withheld while the main thread sits in a modal or
+    tracking mode. A user who clicks Download and then opens the Browse panel,
+    or just holds the mouse on the popover header, would see the progress label
+    freeze for the duration. A frozen label on a multi-gigabyte download is
+    exactly the "button that appears to have done nothing" that makes people
+    click again, which is what the download latch exists to survive.
+    """
+    target.performSelectorOnMainThread_withObject_waitUntilDone_modes_(
+        selector, argument, False, [NSRunLoopCommonModes]
     )
 
 
@@ -149,6 +162,7 @@ class _PreferencesDelegate(NSObject):
 
     # ---- General -----------------------------------------------------------
 
+    @objc_safe
     def openTranscripts_(self, sender):
         from overheard import config as _cfg
         from pathlib import Path as _Path
@@ -156,12 +170,14 @@ class _PreferencesDelegate(NSObject):
         d.mkdir(parents=True, exist_ok=True)
         os.system(f'open "{d}"')
 
+    @objc_safe
     def quitApp_(self, sender):
         import rumps
         rumps.quit_application()
 
     # ---- Audio Setup -------------------------------------------------------
 
+    @objc_safe
     def createRecordingDevice_(self, sender):
         self._aggregate_status.setStringValue_("Creating...")
         threading.Thread(target=self._do_create_aggregate, daemon=True).start()
@@ -170,6 +186,7 @@ class _PreferencesDelegate(NSObject):
         ok, msg = create_aggregate_device()
         _set_label(self._aggregate_status, f"{'✓' if ok else '✗'} {msg}")
 
+    @objc_safe
     def createMonitoringDevice_(self, sender):
         self._multiout_status.setStringValue_("Creating...")
         threading.Thread(target=self._do_create_multiout, daemon=True).start()
@@ -180,6 +197,7 @@ class _PreferencesDelegate(NSObject):
 
     # ---- Engine ------------------------------------------------------------
 
+    @objc_safe
     def refreshStatusOnMain_(self, _ignored):
         """ObjC entry point so a worker thread can request a refresh.
 
@@ -263,11 +281,13 @@ class _PreferencesDelegate(NSObject):
                 file=sys.stderr,
             )
 
+    @objc_safe
     def toggleLivePreview_(self, sender):
         cfg.set_value("live_preview", bool(sender.state()))
 
     # ---- Speakers ----------------------------------------------------------
 
+    @objc_safe
     def toggleSpeakerMemory_(self, sender):
         cfg.set_value("speaker_memory", bool(sender.state()))
 
@@ -289,6 +309,7 @@ class _PreferencesDelegate(NSObject):
         self._speakers_popup.setEnabled_(bool(known))
         self._forget_btn.setEnabled_(bool(known))
 
+    @objc_safe
     def forgetSpeaker_(self, sender):
         from overheard.speakers import SpeakerLibrary
 
@@ -301,6 +322,7 @@ class _PreferencesDelegate(NSObject):
 
     # ---- Dependencies ------------------------------------------------------
 
+    @objc_safe
     def downloadModels_(self, sender):
         """Start a download, unless one is already running.
 
@@ -320,6 +342,7 @@ class _PreferencesDelegate(NSObject):
             target=self._do_download_models, args=(generation,), daemon=True
         ).start()
 
+    @objc_safe
     def releaseDownload_(self, generation):
         """Clear the latch, but only if this download still owns it.
 
@@ -336,6 +359,19 @@ class _PreferencesDelegate(NSObject):
             self._downloading = False
 
     @objc.python_method
+    def _queue_refresh(self) -> None:
+        """Ask the main thread to re-read everything, from a worker.
+
+        Direct when already on the main thread, for the same reason _set_label
+        is: an asynchronous perform would not have run by the time the caller
+        returns, and a test or a main-thread caller would see nothing happen.
+        """
+        if NSThread.isMainThread():
+            self.refresh_status()
+            return
+        _perform_on_main(self, "refreshStatusOnMain:", None)
+
+    @objc.python_method
     def _finish_download(self, generation) -> None:
         """Release the latch on the main thread, ordered after the label.
 
@@ -346,9 +382,7 @@ class _PreferencesDelegate(NSObject):
         if NSThread.isMainThread():
             self.releaseDownload_(generation)
             return
-        self.performSelectorOnMainThread_withObject_waitUntilDone_(
-            "releaseDownload:", generation, False
-        )
+        _perform_on_main(self, "releaseDownload:", generation)
 
     @objc.python_method
     def _do_download_models(self, generation=None):
@@ -388,29 +422,28 @@ class _PreferencesDelegate(NSObject):
                     )
                     return
 
-            # Released on the main thread, queued before the refresh so the
-            # latch outlives the "Downloading..." text rather than clearing
-            # while the pane still shows it.
-            self._finish_download(generation)
-            self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "refreshStatusOnMain:", None, False
-            )
-            return
+            self._queue_refresh()
         except subprocess.TimeoutExpired:
             _set_label(self._deps_status, "✗ Download timed out")
         except Exception as e:
             _set_label(self._deps_status, f"✗ {e}")
         finally:
-            # Every failure path lands here, and a download that failed must
-            # not block the retry. The success path returned above, having
-            # already handed its release to the main thread.
+            # The single release point, for every path through this method.
+            # An earlier version released on the success path and again here,
+            # because a return inside a try still runs its finally, and the
+            # comment claiming otherwise was the real hazard: the next edit
+            # would have reasoned from it. Queued after the label writes above
+            # and after the refresh, so the latch outlives the "Downloading..."
+            # text rather than clearing while the pane still shows it.
             self._finish_download(generation)
 
     # ---- Output Folder -----------------------------------------------------
 
+    @objc_safe
     def toggleKeepRecordings_(self, sender):
         cfg.set_value("keep_recordings", bool(sender.state()))
 
+    @objc_safe
     def browseOutputFolder_(self, sender):
         panel = NSOpenPanel.openPanel()
         panel.setCanChooseFiles_(False)
@@ -431,6 +464,7 @@ class _PreferencesDelegate(NSObject):
 
     # ---- Integrations, Obsidian -------------------------------------------
 
+    @objc_safe
     def toggleObsidian_(self, sender):
         enabled = bool(sender.state())
         cfg.set_value("obsidian_enabled", enabled)
@@ -438,6 +472,7 @@ class _PreferencesDelegate(NSObject):
         self._obsidian_inbox_field.setEnabled_(enabled)
         self._obsidian_browse_btn.setEnabled_(enabled)
 
+    @objc_safe
     def browseObsidianVault_(self, sender):
         panel = NSOpenPanel.openPanel()
         panel.setCanChooseFiles_(False)
@@ -455,16 +490,19 @@ class _PreferencesDelegate(NSObject):
             self._obsidian_vault_field.setStringValue_(path)
             cfg.set_value("obsidian_vault", path)
 
+    @objc_safe
     def saveObsidianInbox_(self, sender):
         val = self._obsidian_inbox_field.stringValue().strip()
         cfg.set_value("obsidian_inbox", val or "01_Inbox")
 
+    @objc_safe
     def saveLocalSpeakerName_(self, sender):
         val = self._local_speaker_field.stringValue().strip()
         cfg.set_value("local_speaker_name", val or "Don")
 
     # ---- Integrations, Calendar -------------------------------------------
 
+    @objc_safe
     def connectCalendar_(self, sender):
         """Trigger the macOS Calendar TCC permission prompt deliberately."""
         self._calendar_status.setStringValue_("Requesting access…")
@@ -479,14 +517,14 @@ class _PreferencesDelegate(NSObject):
                 capture_output=True, text=True, timeout=30,
             )
             if result.returncode == 0 and result.stdout.strip():
-                self._calendar_status.setStringValue_("✓ Calendar access granted")
+                _set_label(self._calendar_status, "✓ Calendar access granted")
             else:
                 err = (result.stderr or "Permission denied").strip()[:80]
-                self._calendar_status.setStringValue_(f"✗ {err}")
+                _set_label(self._calendar_status, f"✗ {err}")
         except subprocess.TimeoutExpired:
-            self._calendar_status.setStringValue_("✗ Timed out. Check System Settings → Privacy → Calendars")
+            _set_label(self._calendar_status, "✗ Timed out. Check System Settings → Privacy → Calendars")
         except Exception as e:
-            self._calendar_status.setStringValue_(f"✗ {e}")
+            _set_label(self._calendar_status, f"✗ {e}")
 
 
 def _model_status() -> str:

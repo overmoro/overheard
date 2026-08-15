@@ -126,3 +126,58 @@ class TestTheBackendReportsUnavailableRatherThanRaising:
 
         monkeypatch.setattr(subprocess, "run", oserror)
         assert diarization._diarize_fluidaudio("meeting.wav") is None
+
+
+class TestMalformedSegmentsDoNotCostTheTranscript:
+    """Well-formed JSON is not well-formed output.
+
+    The parse is guarded; the loop that reads each segment was not. It runs
+    after transcription has completed, and app._on_details_confirmed deletes
+    the temp WAV when transcribe_audio raises, so a single bad segment
+    destroyed a fully transcribed meeting and left an error notification.
+    """
+
+    @pytest.fixture(autouse=True)
+    def real_backend(self, monkeypatch):
+        monkeypatch.undo()
+
+    @pytest.fixture
+    def helper_returning(self, monkeypatch, tmp_path):
+        def install(payload):
+            binary = tmp_path / "overheard-helper"
+            binary.write_text("")
+            monkeypatch.setattr("overheard.helper.helper_path", lambda: binary)
+
+            class Result:
+                returncode = 0
+                stdout = json.dumps(payload).encode()
+                stderr = b""
+
+            monkeypatch.setattr(subprocess, "run", lambda *a, **k: Result())
+        return install
+
+    @pytest.mark.parametrize("segment", [
+        pytest.param({"start": 0.0, "end": 1.0}, id="missing-speaker"),
+        pytest.param({"end": 1.0, "speaker": "A"}, id="missing-start"),
+        pytest.param({"start": None, "end": 1.0, "speaker": "A"}, id="null-start"),
+        pytest.param({"start": "0.0s", "end": 1.0, "speaker": "A"}, id="non-numeric"),
+        pytest.param({"start": 0.0, "end": "later", "speaker": "A"}, id="non-numeric-end"),
+    ])
+    def test_a_malformed_segment_is_skipped_not_fatal(self, helper_returning, segment):
+        helper_returning({"segments": [segment]})
+        result = diarization._diarize_fluidaudio("meeting.wav")
+        assert result == [], f"{segment} should be skipped, got {result}"
+
+    def test_good_segments_survive_a_bad_neighbour(self, helper_returning):
+        """One bad segment costs that segment, not the other speakers."""
+        helper_returning({"segments": [
+            {"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"},
+            {"start": None, "end": 2.0, "speaker": "SPEAKER_01"},
+            {"start": 2.0, "end": 3.0, "speaker": "SPEAKER_02"},
+        ]})
+        result = diarization._diarize_fluidaudio("meeting.wav")
+        assert [t["speaker"] for t in result] == ["SPEAKER_00", "SPEAKER_02"]
+
+    def test_a_segments_key_that_is_not_a_list_does_not_raise(self, helper_returning):
+        helper_returning({"segments": "unexpected"})
+        assert diarization._diarize_fluidaudio("meeting.wav") in ([], None)

@@ -29,15 +29,26 @@ class FakeLabel:
         self.value = ""
         self.direct_writes = 0
         self.marshalled_writes = 0
+        self.modes = []
 
     def setStringValue_(self, text):
         self.value = text
         self.direct_writes += 1
 
     def performSelectorOnMainThread_withObject_waitUntilDone_(self, sel, obj, wait):
+        raise AssertionError(
+            "the default-mode perform was used. It is delivered only in "
+            "NSDefaultRunLoopMode, so progress freezes while a modal or "
+            "tracking loop is running, which is when the user clicks again."
+        )
+
+    def performSelectorOnMainThread_withObject_waitUntilDone_modes_(
+        self, sel, obj, wait, modes
+    ):
         assert sel == "setStringValue:", f"unexpected selector {sel!r}"
         self.value = obj
         self.marshalled_writes += 1
+        self.modes.append(modes)
 
 
 @pytest.fixture
@@ -159,6 +170,28 @@ class TestThreadSafety:
         assert delegate._deps_status.marshalled_writes == 1
         assert delegate._deps_status.direct_writes == 0
 
+    def test_a_worker_write_is_delivered_in_every_run_loop_mode(self, delegate):
+        """The default-mode perform freezes while a modal or tracking loop runs.
+
+        A user who clicks Download and then opens the Browse panel, or holds
+        the mouse on the popover header, would see the progress label stop
+        updating for the duration. A frozen label on a multi-gigabyte download
+        is what makes people click the button again.
+        """
+        import threading
+        from Foundation import NSRunLoopCommonModes
+
+        done = threading.Event()
+
+        def worker():
+            preferences._set_label(delegate._deps_status, "progress")
+            done.set()
+
+        threading.Thread(target=worker, daemon=True).start()
+        assert done.wait(timeout=5)
+        assert delegate._deps_status.modes, "no modes recorded"
+        assert NSRunLoopCommonModes in delegate._deps_status.modes[0]
+
     def test_a_main_thread_write_is_immediate(self, delegate):
         """Queueing the main thread's own writes leaves the window blank.
 
@@ -187,3 +220,60 @@ class TestThreadSafety:
         assert delegate.respondsToSelector_("refreshStatusOnMain:"), (
             "the download worker calls this selector by name when it finishes"
         )
+
+
+class TestTheCalendarWorker:
+    """The fourth worker in this file, which the first pass missed."""
+
+    def test_its_label_writes_are_marshalled(self, delegate, monkeypatch):
+        """_set_label exists for exactly this, and this worker bypassed it.
+
+        Three of the four _do_* workers were converted and this one was not, so
+        the class carried two contradictory patterns with nothing to say which
+        was intended.
+        """
+        import threading
+
+        delegate._calendar_status = FakeLabel()
+        monkeypatch.setattr(
+            preferences.subprocess, "run",
+            lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+        )
+
+        done = threading.Event()
+
+        def worker():
+            try:
+                delegate._do_connect_calendar()
+            finally:
+                done.set()
+
+        threading.Thread(target=worker, daemon=True).start()
+        assert done.wait(timeout=10), "the calendar worker never finished"
+
+        assert delegate._calendar_status.direct_writes == 0, (
+            "the calendar worker wrote to an NSTextField from a daemon thread"
+        )
+        assert delegate._calendar_status.marshalled_writes >= 1
+
+
+class TestTheLatchGeneration:
+    def test_a_finishing_worker_does_not_release_a_later_download(self, delegate):
+        """The counter exists for this, and nothing tested it.
+
+        Worker 1 finishes after the user has already started download 2. Its
+        release must be a no-op, or a third click starts a download concurrent
+        with the second.
+        """
+        delegate._downloading = True
+        delegate._download_generation = 2      # download 2 owns the latch
+        delegate.releaseDownload_(1)           # worker 1 finishes late
+        assert delegate._downloading is True, (
+            "a stale worker released a latch belonging to a later download"
+        )
+
+    def test_the_owning_worker_does_release(self, delegate):
+        delegate._downloading = True
+        delegate._download_generation = 2
+        delegate.releaseDownload_(2)
+        assert delegate._downloading is False

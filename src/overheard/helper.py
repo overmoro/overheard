@@ -89,11 +89,17 @@ _REQUIRED_DIARIZATION_MODELS = (
     "plda-parameters.json",
 )
 
-#: FluidAudio itself probes several names for this folder, so it has moved
-#: before and expects to again. Matching a pattern rather than one literal
-#: keeps a rename from making the Download button permanently useless: the
-#: label would read Missing, the helper would find everything and return in
-#: under a second, and the label would go straight back to Missing.
+#: The folder FluidAudio actually loads from: ModelHub resolves the diarizer to
+#: exactly one path, built from Repo.diarizer.folderName. Checked first, so a
+#: complete legacy sibling cannot vouch for a half-downloaded live one.
+_DIARIZATION_SUBDIR = "speaker-diarization-coreml"
+
+#: Consulted only when the folder above is absent entirely. FluidAudio probes
+#: three names when loading the PLDA parameters, which is direct evidence this
+#: path has moved before and will again, and a rename would otherwise leave the
+#: label reading Missing while the helper finds everything and returns in under
+#: a second: a Download button that completes instantly, changes nothing, and
+#: never stops asking.
 _DIARIZATION_SUBDIR_GLOB = "speaker-diarization*"
 
 
@@ -129,12 +135,21 @@ def diarization_models_present() -> bool:
     if not FLUIDAUDIO_MODELS.is_dir():
         return False
 
-    for parent in sorted(FLUIDAUDIO_MODELS.glob(_DIARIZATION_SUBDIR_GLOB)):
-        if not parent.is_dir():
-            continue
-        if all(_present(parent / name) for name in _REQUIRED_DIARIZATION_MODELS):
-            return True
-    return False
+    def complete(parent: Path) -> bool:
+        return all(_present(parent / name) for name in _REQUIRED_DIARIZATION_MODELS)
+
+    # The folder the helper will really load from decides the answer whenever
+    # it exists, complete or not. Falling through to a sibling here is how a
+    # leftover legacy folder ends up reporting "Installed" for a live folder
+    # that is still half downloaded.
+    canonical = FLUIDAUDIO_MODELS / _DIARIZATION_SUBDIR
+    if canonical.is_dir():
+        return complete(canonical)
+
+    return any(
+        parent.is_dir() and complete(parent)
+        for parent in sorted(FLUIDAUDIO_MODELS.glob(_DIARIZATION_SUBDIR_GLOB))
+    )
 
 
 def _present(artefact: Path) -> bool:

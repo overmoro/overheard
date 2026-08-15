@@ -21,6 +21,8 @@ from AppKit import (
     NSTextField,
 )
 from Foundation import NSObject
+
+from overheard.objc_safety import objc_safe
 from typing import Any
 
 try:
@@ -144,6 +146,7 @@ class _DetailsDelegate(NSObject):
         self._discard_callback = discard_callback
         return self
 
+    @objc_safe
     def onStartTranscription_(self, sender):
         name = self._name_field.stringValue().strip() or "meeting"
         source_idx = self._source_popup.indexOfSelectedItem()
@@ -164,6 +167,7 @@ class _DetailsDelegate(NSObject):
         if self._callback:
             threading.Thread(target=self._callback, args=(details,), daemon=True).start()
 
+    @objc_safe
     def onSourceChanged_(self, sender):
         """Auto-fill location when source changes."""
         idx = sender.indexOfSelectedItem()
@@ -173,11 +177,13 @@ class _DetailsDelegate(NSObject):
         if loc:
             self._location_field.setStringValue_(loc)
 
+    @objc_safe
     def onDiscard_(self, sender):
         """First click: reveal the red confirm button."""
         self._confirm_discard_btn.setHidden_(False)
         sender.setEnabled_(False)
 
+    @objc_safe
     def onConfirmDiscard_(self, sender):
         """Second click: actually discard the recording."""
         self._window.orderOut_(None)

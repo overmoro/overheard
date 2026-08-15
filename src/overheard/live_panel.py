@@ -23,6 +23,8 @@ from AppKit import (
     NSMakeRange,
 )
 from Foundation import NSObject, NSTimer
+
+from overheard.objc_safety import objc_safe
 from typing import Any
 
 PANEL_W = 380
@@ -56,6 +58,7 @@ class _PollTarget(NSObject):
         self._panel = panel
         return self
 
+    @objc_safe
     def onTick_(self, timer):
         try:
             self._panel._tick()

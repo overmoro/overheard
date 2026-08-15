@@ -27,6 +27,7 @@ from AppKit import (
 from Foundation import NSAttributedString, NSObject, NSTimer
 
 from overheard.state import IDLE, PAUSED, RECORDING, TRANSCRIBING
+from overheard.objc_safety import objc_safe
 
 # ---------------------------------------------------------------------------
 # Geometry
@@ -120,6 +121,7 @@ class _LevelBar(NSView):
         self._active = bool(v)
         self.setNeedsDisplay_(True)
 
+    @objc_safe
     def drawRect_(self, rect):
         from AppKit import NSBezierPath
         b  = self.bounds()
@@ -186,10 +188,12 @@ class _PillButton(NSView):
 
     # ---- Mouse events -------------------------------------------------
 
+    @objc_safe
     def mouseEntered_(self, event):
         self._expanding = True
         self._ensure_timer()
 
+    @objc_safe
     def mouseExited_(self, event):
         self._expanding = False
         self._ensure_timer()
@@ -197,6 +201,7 @@ class _PillButton(NSView):
     def acceptsFirstResponder(self):
         return True
 
+    @objc_safe
     def mouseDown_(self, event):
         if self._enabled and self._callback:
             self._callback()
@@ -209,6 +214,7 @@ class _PillButton(NSView):
                 1.0 / 60.0, self, "onAnimTick:", None, True
             )
 
+    @objc_safe
     def onAnimTick_(self, timer):
         step = (1.0 / 60.0) / 0.18   # 0.18 s transition
         if self._expanding:
@@ -222,6 +228,7 @@ class _PillButton(NSView):
 
     # ---- Drawing ------------------------------------------------------
 
+    @objc_safe
     def drawRect_(self, rect):
         from AppKit import NSBezierPath
         t  = self._progress
@@ -278,11 +285,13 @@ class _DragHeader(NSView):
         self._drag_event_loc = None
         return self
 
+    @objc_safe
     def drawRect_(self, rect):
         NSColor.colorWithWhite_alpha_(0.94, 1.0).setFill()
         from AppKit import NSBezierPath
         NSBezierPath.fillRect_(self.bounds())
 
+    @objc_safe
     def mouseDown_(self, event):
         # Record the panel origin at drag start in screen coords
         win = self.window()
@@ -290,6 +299,7 @@ class _DragHeader(NSView):
             self._drag_start = win.frame().origin
             self._drag_event_loc = event.locationInWindow()
 
+    @objc_safe
     def mouseDragged_(self, event):
         win = self.window()
         # Both are set together in mouseDown_, so checking only _drag_start and
@@ -303,6 +313,7 @@ class _DragHeader(NSView):
         origin = win.frame().origin
         win.setFrameOrigin_((origin.x + dx, origin.y + dy))
 
+    @objc_safe
     def mouseUp_(self, event):
         self._drag_start = None
 
@@ -363,6 +374,7 @@ class _PopoverDelegate(NSObject):
         self._toggle_cb = None   # set by TransportPopover after build
         return self
 
+    @objc_safe
     def togglePanel_(self, sender):
         from AppKit import NSEventTypeRightMouseDown
         event = NSApplication.sharedApplication().currentEvent()
@@ -399,20 +411,24 @@ class _PopoverDelegate(NSObject):
             sender,
         )
 
+    @objc_safe
     def showPanel_(self, sender):
         if self._toggle_cb:
             self._toggle_cb()
 
+    @objc_safe
     def openTranscripts_(self, sender):
         cb = self._cbs.get("open_transcripts")
         if cb:
             cb()
 
+    @objc_safe
     def openPreferences_(self, sender):
         cb = self._cbs.get("preferences")
         if cb:
             cb()
 
+    @objc_safe
     def quitApp_(self, sender):
         import rumps
         rumps.quit_application()

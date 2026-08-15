@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# setup-macos.sh — Install system dependencies for overheard on macOS.
+# setup-macos.sh: install system dependencies for overheard on macOS.
 # Run this once on a fresh machine. Requires sudo for BlackHole.
 set -euo pipefail
 
-echo "=== Overheard — macOS Setup ==="
+echo "=== Overheard, macOS Setup ==="
 echo ""
 
 # --- Homebrew ---
@@ -54,18 +54,14 @@ echo ""
 echo "  1. Install the Python package:"
 echo "     pip install -e ."
 echo ""
-echo "  2. Set your Hugging Face token:"
-echo "     export HF_TOKEN=your_token_here"
-echo "     (Add to ~/.zshrc for persistence)"
-echo ""
-echo "  3. Create the Aggregate Audio Device:"
+echo "  2. Create the Aggregate Audio Device:"
 echo "     - Open 'Audio MIDI Setup' (Spotlight → Audio MIDI Setup)"
 echo "     - Click '+' in the bottom-left → 'Create Aggregate Device'"
 echo "     - Rename it to 'Meeting Capture'"
 echo "     - Check both 'BlackHole 2ch' and 'MacBook Pro Microphone'"
 echo "     - Set BlackHole 2ch as the clock source"
 echo ""
-echo "  4. Route system audio through BlackHole:"
+echo "  3. Route system audio through BlackHole:"
 echo "     - Open 'Audio MIDI Setup'"
 echo "     - Click '+' → 'Create Multi-Output Device'"
 echo "     - Check both 'MacBook Pro Speakers' and 'BlackHole 2ch'"
@@ -74,9 +70,9 @@ echo "     (This sends system audio to both your speakers AND BlackHole for capt
 echo ""
 
 if [ "${NEEDS_REBOOT:-false}" = true ]; then
-    echo "  *** REBOOT YOUR MAC before proceeding — BlackHole needs it ***"
+    echo "  *** REBOOT YOUR MAC before proceeding: BlackHole needs it ***"
     echo ""
 fi
 
-echo "  5. Run the app:"
+echo "  4. Run the app:"
 echo "     overheard"

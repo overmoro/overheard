@@ -84,17 +84,32 @@ def _diarize_fluidaudio(
         return None
 
     turns = []
+    skipped = 0
     for segment in payload.get("segments", []):
-        if segment.get("end", 0) <= segment.get("start", 0):
+        # Well-formed JSON is not well-formed output. A missing key, a null
+        # timestamp or a non-numeric one all raise here, and this loop sits
+        # after transcription has already run: an exception escaping it takes
+        # the whole meeting down at the last step, since the caller deletes the
+        # temp WAV once transcribe_audio fails. One bad segment costs that
+        # segment.
+        try:
+            if segment.get("end", 0) <= segment.get("start", 0):
+                continue
+            turn = {
+                "start": float(segment["start"]),
+                "end": float(segment["end"]),
+                "speaker": segment["speaker"],
+            }
+        except (KeyError, TypeError, ValueError, AttributeError):
+            skipped += 1
             continue
-        turn = {
-            "start": float(segment["start"]),
-            "end": float(segment["end"]),
-            "speaker": segment["speaker"],
-        }
         if with_embeddings and segment.get("embedding"):
             turn["embedding"] = segment["embedding"]
         turns.append(turn)
+
+    if skipped:
+        print(f"[overheard] skipped {skipped} malformed diarizer segments",
+              file=sys.stderr)
     return turns
 
 
