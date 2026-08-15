@@ -1,4 +1,4 @@
-"""Meeting Details panel — shown after recording stops, before transcription begins."""
+"""Meeting Details panel, shown after recording stops and before transcription begins."""
 
 import re
 import threading
@@ -88,7 +88,7 @@ def _make_text_field(x: float, y: float, w: float, h: float, placeholder: str = 
 
 
 # ---------------------------------------------------------------------------
-# Table data source / delegate — handles attendee rows
+# Table data source / delegate: handles attendee rows
 # ---------------------------------------------------------------------------
 
 class _AttendeeDataSource(NSObject):
@@ -131,7 +131,7 @@ class _AttendeeDataSource(NSObject):
 
 
 # ---------------------------------------------------------------------------
-# Delegate — button actions
+# Delegate: button actions
 # ---------------------------------------------------------------------------
 
 class _DetailsDelegate(NSObject):
@@ -174,12 +174,12 @@ class _DetailsDelegate(NSObject):
             self._location_field.setStringValue_(loc)
 
     def onDiscard_(self, sender):
-        """First click — reveal the red confirm button."""
+        """First click: reveal the red confirm button."""
         self._confirm_discard_btn.setHidden_(False)
         sender.setEnabled_(False)
 
     def onConfirmDiscard_(self, sender):
-        """Second click — actually discard the recording."""
+        """Second click: actually discard the recording."""
         self._window.orderOut_(None)
         # Reset discard button state for next time
         self._discard_btn.setEnabled_(True)
@@ -212,9 +212,28 @@ class DetailsPanel:
         self._callback = callback
         self._discard_callback = discard_callback
         self._window: Any = None
-        # Both are built by _build, which show() calls before reading them.
-        self._delegate: Any = None
-        self._data_source: Any = None
+        # Built lazily by _build. Optional is the honest type here, because
+        # _build can raise partway and leave the window set with these still
+        # None; _ensure_built below is what makes that state unreachable from
+        # show().
+        self._delegate: "_DetailsDelegate | None" = None
+        self._data_source: "_AttendeeDataSource | None" = None
+
+    def _ensure_built(self) -> "tuple[_DetailsDelegate, _AttendeeDataSource]":
+        """Build on first use, and hand back the two objects show() needs.
+
+        Keying on the delegate rather than on the window is deliberate. _build
+        assigns _window first, so an exception raised after that point left a
+        window in place and a None delegate, and every later show() then died
+        on an attribute of None inside an AppKit action callback, which aborts
+        the process without a traceback.
+        """
+        if self._delegate is None or self._data_source is None:
+            self._build()
+        delegate, data_source = self._delegate, self._data_source
+        if delegate is None or data_source is None:
+            raise RuntimeError("the details panel failed to build")
+        return delegate, data_source
 
     def show(
         self,
@@ -224,29 +243,28 @@ class DetailsPanel:
         attendees: list[str] | None = None,
         speaker_count: int = 2,
     ) -> None:
-        if self._window is None:
-            self._build()
+        delegate, data_source = self._ensure_built()
 
         # Pre-fill fields
-        self._delegate._name_field.setStringValue_(name)
-        self._delegate._location_field.setStringValue_(location)
+        delegate._name_field.setStringValue_(name)
+        delegate._location_field.setStringValue_(location)
 
         # Set source popup
         display_label = next(
             (lbl for lbl, key in SOURCE_OPTIONS if key == source),
             "In-person",
         )
-        self._delegate._source_popup.selectItemWithTitle_(display_label)
+        delegate._source_popup.selectItemWithTitle_(display_label)
 
-        # Build attendee rows — pre-fill from calendar, pad to speaker_count
+        # Build attendee rows: pre-fill from calendar, pad to speaker_count
         rows = []
         attendees = attendees or []
         for i in range(max(speaker_count, len(attendees))):
             speaker_id = f"SPEAKER_{i:02d}"
             name_val = attendees[i] if i < len(attendees) else ""
             rows.append([speaker_id, name_val])
-        self._data_source.setRows_(rows)
-        self._delegate._table_view.reloadData()
+        data_source.setRows_(rows)
+        delegate._table_view.reloadData()
 
         self._window.makeKeyAndOrderFront_(None)
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
@@ -346,7 +364,7 @@ class DetailsPanel:
         cv.addSubview_(discard_btn)
         self._delegate._discard_btn = discard_btn
 
-        # Confirm discard — hidden until first click, red destructive style
+        # Confirm discard: hidden until first click, red destructive style
         confirm_btn = NSButton.alloc().initWithFrame_(NSMakeRect(128, y, 160, 32))
         confirm_btn.setTitle_("⚠️ Yes, delete it")
         confirm_btn.setBezelStyle_(1)

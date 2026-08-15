@@ -380,19 +380,36 @@ class PreferencesWindow:
 
     def __init__(self):
         self._window: Any = None
-        # A PyObjC delegate, genuinely untyped; built by _build below.
-        self._delegate: Any = None
+        # Built lazily by _build, which assigns _window several lines before
+        # this, so an exception in between leaves a window with no delegate.
+        # _ensure_built is what keeps show() off that path.
+        self._delegate: "_PreferencesDelegate | None" = None
+
+    def _ensure_built(self) -> "_PreferencesDelegate":
+        """Build on first use and hand back the delegate show() needs.
+
+        Keyed on the delegate rather than on the window. _build assigns
+        _window first, so a failure after that point used to leave _window set
+        and _delegate None, and every later click on the gear then raised
+        AttributeError on None inside an ObjC action callback, which aborts
+        the process with no crash report.
+        """
+        if self._delegate is None:
+            self._build()
+        delegate = self._delegate
+        if delegate is None:
+            raise RuntimeError("the preferences window failed to build")
+        return delegate
 
     def show(self) -> None:
         """Open the window, refreshing anything that can go stale while closed.
 
         The window is built once and reused, so status computed during _build
         would be a reading from the first time Preferences was ever opened.
-        Models get downloaded and engines get switched long after that.
+        Models get downloaded long after that.
         """
-        if self._window is None:
-            self._build()
-        self._delegate.refresh_status()
+        delegate = self._ensure_built()
+        delegate.refresh_status()
         self._window.makeKeyAndOrderFront_(None)
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
 

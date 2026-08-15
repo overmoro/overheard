@@ -1,4 +1,4 @@
-"""Overheard — menu bar popover transport UI."""
+"""Overheard: menu bar popover transport UI."""
 
 import math
 from typing import Any
@@ -34,7 +34,7 @@ from overheard.state import IDLE, PAUSED, RECORDING, TRANSCRIBING
 POP_W   = 300
 POP_H   = 210
 _HDR_H  = 52
-_BODY_H = POP_H - _HDR_H   # 158 — available body height
+_BODY_H = POP_H - _HDR_H   # 158, available body height
 
 _BTN_D   = 50    # button circle diameter (collapsed)
 _BTN_EW  = 90    # button frame width (expanded pill)
@@ -54,7 +54,7 @@ _M_BAR_W   = POP_W - _M_BAR_X - _M_PAD_R          # = 240
 _TRACK_OPTS = 0x01 | 0x02 | 0x80
 
 # ---------------------------------------------------------------------------
-# Layout — computed top-down through the body.
+# Layout, computed top-down through the body.
 #
 # AppKit coordinate system: y=0 at bottom of view, increases upward.
 # Every constant below is the BOTTOM EDGE y of that element in the body
@@ -426,17 +426,27 @@ class TransportPopover:
 
     def __init__(self, callbacks: dict):
         self._delegate        = _PopoverDelegate.alloc().initWithCallbacks_(callbacks)
-        # Filled in by _build below, which runs before anything reads them.
+        # Framework handles, genuinely untyped. Filled in by _build below.
         self._panel:      Any = None
         self._status_btn: Any = None   # status bar button (for positioning)
-        self._btn_record: Any = None
-        self._btn_pause:  Any = None
-        self._btn_stop:   Any = None
         self._status_lbl: Any = None
-        self._mic_bar:    Any = None
-        self._sys_bar:    Any = None
         self._mic_row:    Any = None
         self._sys_row:    Any = None
+
+        # Our own views, declared without a value: _build runs before __init__
+        # returns and always assigns them, so None is not a state this object
+        # is ever observed in. Annotating them Optional instead would demand
+        # None checks guarding a case that cannot occur.
+        #
+        # This does not make mypy check method names on them. _PillButton and
+        # _LevelBar subclass NSView, which PyObjC leaves untyped, so every
+        # attribute on them reads as valid however it is spelled. A misspelled
+        # setter here is caught by running the code, and by nothing else.
+        self._btn_record: _PillButton
+        self._btn_pause:  _PillButton
+        self._btn_stop:   _PillButton
+        self._mic_bar:    _LevelBar
+        self._sys_bar:    _LevelBar
         self._is_multichannel = False
         self._build(callbacks)
 
@@ -551,7 +561,7 @@ class TransportPopover:
         root_box.setBorderType_(0)
         root_box.setFillColor_(NSColor.windowBackgroundColor())
         root_box.setTitlePosition_(0)
-        root_box.setContentViewMargins_((0, 0))   # no inset — coordinates match frame
+        root_box.setContentViewMargins_((0, 0))   # no inset, so coordinates match frame
         root = root_box.contentView()
 
         # ---- Header (soft grey, draggable) ----------------------------------
@@ -568,7 +578,7 @@ class TransportPopover:
             size=10, color=NSColor.secondaryLabelColor(),
         ))
 
-        # Gear button — right-aligned, vertically centred in header
+        # Gear button: right-aligned, vertically centred in header
         _GEAR_SZ = 38
         gear = NSButton.alloc().initWithFrame_(
             NSMakeRect(POP_W - _GEAR_SZ - 10, (_HDR_H - _GEAR_SZ) // 2, _GEAR_SZ, _GEAR_SZ)
@@ -659,7 +669,7 @@ class TransportPopover:
             False,
         )
         # Add root_box as a subview of the panel's existing content view
-        # rather than replacing it — avoids compositing issues with transparent panels.
+        # rather than replacing it, which avoids compositing issues with transparent panels.
         panel_cv = panel.contentView()
         panel_cv.addSubview_(root_box)
         panel.setHasShadow_(True)
