@@ -147,3 +147,47 @@ class TestDetailsPanel:
         monkeypatch.setattr(panel, "_build", lambda: None)
         with pytest.raises(RuntimeError, match="failed to build"):
             panel._ensure_built()
+
+
+class TestTheRealBuildSucceeds:
+    """The half every other test in this file leaves out.
+
+    Everything above patches ``_build``, so between them they pin what the
+    sentinel *means* four different ways and never once run the statement that
+    sets it. Deleting ``self._built = True`` from the end of both real ``_build``
+    methods left all 270 tests green while making both panels permanently
+    unopenable: ``_ensure_built`` runs the whole hundred-line AppKit build, then
+    raises anyway, on every single call. The gear button catches it and shows
+    nothing; the details panel catches it and every finished recording becomes
+    unreachable.
+
+    A stand-in cannot catch that, because the statement lives in the code the
+    stand-in replaces. These two drive the real thing. Both run headless, which
+    is how the rest of this suite and CI run.
+    """
+
+    def test_preferences_really_builds(self):
+        window = PreferencesWindow()
+        delegate = window._ensure_built()
+        assert delegate is not None
+        assert window._built is True
+
+    def test_details_panel_really_builds(self):
+        panel = DetailsPanel(callback=None)
+        delegate, data_source = panel._ensure_built()
+        assert delegate is not None
+        assert data_source is not None
+        assert panel._built is True
+
+    def test_a_real_finished_build_is_not_repeated(self, monkeypatch):
+        """The sentinel test above, against the real build rather than a stub.
+
+        Its stubbed twin sets ``_built`` inside the stub, so it passes whether or
+        not the production build ever sets it. This one cannot.
+        """
+        window = PreferencesWindow()
+        window._ensure_built()
+        rebuilt = []
+        monkeypatch.setattr(window, "_build", lambda: rebuilt.append(True))
+        window._ensure_built()
+        assert not rebuilt, "a completed real build must not run again on reopen"

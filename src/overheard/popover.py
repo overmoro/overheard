@@ -182,9 +182,14 @@ class _PillButton(NSView):
         """AppKit calls this on every bounds change, window move and resize.
 
         _setup_tracking builds an NSTrackingArea from the current bounds, and a
-        degenerate rect during a live resize makes addTrackingArea_ raise. That
-        unwinds straight back into AppKit and aborts the process, so it is the
-        same class as the guarded actions, just without a sender argument.
+        degenerate rect during a live resize makes addTrackingArea_ raise. The
+        inner try below is what catches that, and it is deliberately narrow: it
+        reports the failure and lets the method carry on to super().
+
+        The decorator is the outer net, not the handler for the case above. It
+        covers the objc.super() call, the print, and anything added here later.
+        Since AppKit dispatches this method directly, anything escaping it
+        aborts the process, which is why both layers are here.
 
         super() is called outside the guarded helper deliberately: AppKit needs
         it whether or not our own tracking setup worked, and skipping it would

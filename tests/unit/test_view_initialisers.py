@@ -31,7 +31,7 @@ one thing a class default cannot fake.
 import pytest
 from AppKit import NSImage, NSMakeRect, NSView
 
-from overheard import popover
+from overheard import popover, state
 
 
 def custom_view_classes():
@@ -151,3 +151,40 @@ def test_every_custom_view_in_a_real_popover_can_draw():
         f"{sorted(cls.__name__ for cls in missing)}. Drew: "
         f"{sorted(cls.__name__ for cls in drawn)}"
     )
+
+
+def test_the_real_popover_survives_the_record_transition():
+    """Pressing Record drives set_state then set_levels, and nothing tested it.
+
+    This range deleted the ``if not self._mic_bar`` guards from both methods on
+    the grounds that ``_build`` always assigns the bars. Nothing checked that
+    claim: popover.py is outside the coverage denominator, and _LevelBar
+    subclasses NSView, which PyObjC leaves untyped, so mypy accepts any
+    attribute however spelled. Dropping ``self._sys_bar = sys_bar`` from _build
+    and misspelling ``setActive_`` left all 270 tests green.
+
+    In production that AttributeError lands inside a rumps.Timer callback,
+    which rumps wraps in its own try/except. So the recorder is live and
+    capturing, the UI never leaves IDLE, Stop stays disabled, and a second press
+    of Record opens a second Core Audio tap on the same devices.
+
+    Naming no attributes here is deliberate: the point is to run the real
+    methods so every attribute name and selector spelling they depend on has to
+    exist. An assertion listing them would need updating every time one moves,
+    and would pin the list rather than the behaviour.
+    """
+    pop = popover.TransportPopover({})
+    pop.configure_channels(True)
+
+    pop.set_state(state.RECORDING, "Recording...")
+    pop.set_levels(0.3, 0.3)
+    pop.set_state(state.PAUSED, "Paused")
+    pop.set_state(state.TRANSCRIBING, "Transcribing...")
+    pop.set_state(state.IDLE, "")
+
+    # Single channel is the other live configuration: _sys_bar is still built
+    # and still driven, just deactivated, so it must survive the same path.
+    mono = popover.TransportPopover({})
+    mono.configure_channels(False)
+    mono.set_state(state.RECORDING, "Recording...")
+    mono.set_levels(0.3, 0.0)

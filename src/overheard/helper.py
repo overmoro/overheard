@@ -92,7 +92,14 @@ _REQUIRED_DIARIZATION_MODELS = (
 #: The folder FluidAudio actually loads from: ModelHub resolves the diarizer to
 #: exactly one path, built from Repo.diarizer.folderName. Checked first, so a
 #: complete legacy sibling cannot vouch for a half-downloaded live one.
-_DIARIZATION_SUBDIR = "speaker-diarization-coreml"
+#:
+#: Read folderName, not name. ModelNames.swift gives the diarizer a `name` of
+#: "speaker-diarization-coreml", but folderName has no .diarizer case and falls
+#: to its default, which strips the "-coreml" suffix. An earlier version of this
+#: constant copied `name`, so the path below never existed on any real install,
+#: the glob fallback silently answered every call, and the protection this
+#: comment describes was absent for as long as it was written down.
+_DIARIZATION_SUBDIR = "speaker-diarization"
 
 #: Consulted only when the folder above is absent entirely. FluidAudio probes
 #: three names when loading the PLDA parameters, which is direct evidence this

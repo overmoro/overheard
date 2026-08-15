@@ -141,18 +141,23 @@ def test_a_stale_sibling_cannot_vouch_for_the_live_folder(models_dir):
     """FluidAudio loads from exactly one path, so only that one can answer.
 
     ModelHub resolves the diarizer to directory/Repo.diarizer.folderName, which
-    is speaker-diarization-coreml. A machine carrying a complete legacy
-    speaker-diarization/ next to a half-downloaded speaker-diarization-coreml/
-    would otherwise report Installed while the folder the helper actually loads
-    is incomplete, and the download would surprise the user mid-meeting.
+    is speaker-diarization: folderName has no .diarizer case and its default
+    strips the "-coreml" that Repo.diarizer.name carries. A machine carrying a
+    complete speaker-diarization-coreml/ next to a half-downloaded
+    speaker-diarization/ would otherwise report Installed while the folder the
+    helper actually loads is incomplete, and the download would surprise the
+    user mid-meeting.
+
+    The roles here were reversed until the seventh review round, which made
+    this file pass against a folder layout that has never existed on disk.
     """
-    _install(models_dir, subdir="speaker-diarization")                    # complete legacy
-    _install(models_dir, subdir="speaker-diarization-coreml", weights=False)  # live, partial
+    _install(models_dir, subdir="speaker-diarization-coreml")            # complete sibling
+    _install(models_dir, subdir="speaker-diarization", weights=False)    # live, partial
     assert helper.diarization_models_present() is False
 
 
 def test_the_live_folder_answers_when_it_is_complete(models_dir):
     """The converse, so the rule is pinned in both directions."""
-    _install(models_dir, subdir="speaker-diarization", weights=False)   # legacy, partial
-    _install(models_dir, subdir="speaker-diarization-coreml")           # live, complete
+    _install(models_dir, subdir="speaker-diarization-coreml", weights=False)  # sibling, partial
+    _install(models_dir, subdir="speaker-diarization")                       # live, complete
     assert helper.diarization_models_present() is True

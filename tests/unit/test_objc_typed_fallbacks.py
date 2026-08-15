@@ -134,9 +134,21 @@ class TestTheNoArgGuard:
     Its two siblings are covered: objc_safe by the mouseDown_ and drawRect_
     tests, objc_safe_returning by the class above. This one could be neutered
     entirely, by narrowing its except to something that never fires, with the
-    whole suite green. Its only shipping use guards updateTrackingAreas, where
-    it is the one thing between a degenerate rect during a live resize and a
-    silent process abort.
+    whole suite green.
+
+    Be careful about what its shipping use actually buys. An earlier version of
+    this docstring said the decorator was the one thing between a degenerate
+    rect during a live resize and a silent process abort. That is false:
+    updateTrackingAreas wraps _setup_tracking in its own try/except, so the
+    degenerate rect is caught there and the decorator never sees it. Deleting
+    the decorator outright leaves test_the_shipping_use_survives_a_failing_setup
+    green, and only the derived guard gate in test_objc_callback_boundary.py
+    notices, by name rather than by behaviour.
+
+    What the decorator really covers is the objc.super() call, the stderr print,
+    and anything added to the method later. That is worth having, because this
+    method is dispatched by AppKit and an escape aborts the process. It is just
+    not what the old sentence claimed.
     """
 
     def test_it_swallows_and_reports(self, capsys):
