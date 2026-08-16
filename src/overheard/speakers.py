@@ -18,8 +18,12 @@ Library lives at ~/.config/overheard/speakers.json:
     {"Sarah Kelly": {"embedding": [...], "samples": 3, "updated": "2026-08-14"}}
 """
 
+import contextlib
 import json
+import os
+import shutil
 import sys
+import tempfile
 from datetime import date
 from pathlib import Path
 
@@ -116,23 +120,83 @@ class SpeakerLibrary:
 
     # ------------------------------------------------------------------
 
+    @property
+    def _backup_path(self) -> Path:
+        return self.path.with_suffix(self.path.suffix + ".bak")
+
     def load(self) -> None:
-        if not self.path.exists():
-            self._entries = {}
+        """Read the library, falling back to the backup if the file is unusable.
+
+        This used to reset to {} on any read failure, print a line to a stderr
+        the user never sees, and carry on. Every voice the app had ever learned
+        was gone at that point, and the next save wrote the empty dict over the
+        file, so a single truncated write was permanent and silent.
+
+        A voice library is accumulated slowly, over many meetings, and cannot be
+        reconstructed from anything: the audio it came from is deleted unless
+        keep_recordings is on. So a failed read is treated as something to
+        recover from rather than something to shrug at.
+        """
+        for candidate, described in ((self.path, "library"),
+                                     (self._backup_path, "backup library")):
+            if not candidate.exists():
+                continue
+            try:
+                with open(candidate) as f:
+                    data = json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"[overheard] could not read speaker {described}: {e}",
+                      file=sys.stderr)
+                continue
+            if not isinstance(data, dict):
+                print(f"[overheard] speaker {described} was not an object",
+                      file=sys.stderr)
+                continue
+            if candidate is not self.path:
+                print(f"[overheard] recovered {len(data)} voices from the backup",
+                      file=sys.stderr)
+            self._entries = data
             return
-        try:
-            with open(self.path) as f:
-                data = json.load(f)
-            self._entries = data if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, OSError) as e:
-            print(f"[overheard] could not read speaker library: {e}", file=sys.stderr)
-            self._entries = {}
+
+        self._entries = {}
 
     def save(self) -> None:
+        """Write atomically, keeping the previous good copy as a backup.
+
+        Two separate hazards, and the plain `open(path, "w")` this replaces had
+        both. It truncates before it writes, so a crash, a full disk or a kill
+        partway through leaves a half-written file that load() cannot parse. And
+        it kept no previous copy, so a logically wrong but syntactically valid
+        write, which is what a shape mismatch in remember() produced, was
+        unrecoverable the moment it landed.
+
+        Writing to a temp file in the same directory and renaming makes the
+        replacement atomic: os.replace either happens or does not, and a reader
+        sees the old file or the new one, never a partial one. Same directory
+        matters, since a rename across filesystems is not atomic.
+        """
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.path, "w") as f:
-                json.dump(self._entries, f, indent=2)
+            if self.path.exists():
+                # Copy rather than rename: a rename would leave no library at
+                # all in the window before the new one lands.
+                shutil.copy2(self.path, self._backup_path)
+
+            fd, tmp_name = tempfile.mkstemp(
+                dir=self.path.parent, prefix=self.path.name, suffix=".tmp"
+            )
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(self._entries, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_name, self.path)
+            except BaseException:
+                # Including KeyboardInterrupt and SystemExit: leaving a stray
+                # temp file next to the library is worse than the interruption.
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_name)
+                raise
         except OSError as e:
             print(f"[overheard] could not write speaker library: {e}", file=sys.stderr)
 
@@ -204,7 +268,24 @@ class SpeakerLibrary:
         return matched
 
     def remember(self, name: str, embedding) -> None:
-        """Fold an embedding into the stored average for a name."""
+        """Fold an embedding into the stored average for a name.
+
+        Refuses to discard an accumulated profile. On a shape mismatch this used
+        to overwrite the entry and reset samples to 1, so a single malformed
+        vector replaced a voice heard across a dozen meetings, silently and with
+        no way back. That is not hypothetical: it is what a width bug in the
+        diarizer guard actually did, and the whole reason this method is now
+        careful.
+
+        The rule: a stored profile with more than one sample in it is evidence,
+        and one disagreeing vector is not enough to throw it away. The caller
+        cannot make this judgement, since it does not know what is on disk.
+
+        A legitimate width change upstream lands here too, and is deliberately
+        NOT auto-accepted: it would be indistinguishable from the corruption
+        above. It reports itself instead and names the way out, which is why
+        forget() exists.
+        """
         import numpy as np
 
         vector = np.asarray(embedding, dtype="float64")
@@ -220,6 +301,15 @@ class SpeakerLibrary:
                 # that has been heard many times.
                 vector = (stored * samples + vector) / (samples + 1)
                 samples += 1
+            elif int(entry.get("samples", 1)) > 1:
+                print(
+                    f"[overheard] refusing to replace the voice profile for "
+                    f"{name}: stored {stored.shape[0]} values over "
+                    f"{entry.get('samples')} meetings, got {vector.shape[0]}. "
+                    f"Forget this speaker in Preferences to learn them again.",
+                    file=sys.stderr,
+                )
+                return
             else:
                 samples = 1
         else:
