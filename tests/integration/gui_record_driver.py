@@ -2,107 +2,99 @@
 
 Run as a subprocess by test_gui_record_path.py, never imported by the suite.
 
-It exists as a separate process for one reason: the failure this is written to
-catch aborts the process. ``_LevelBar`` overrode ``init`` while ``_build``
-constructed it with ``initWithFrame_``, so ``drawRect_`` raised AttributeError
-inside AppKit's drawing machinery, where an unhandled Python exception is not an
-exception at all but a SIGTRAP. Pressing Record unhid the system meter row, the
-row drew for the first time, and Overheard vanished. In-process that would kill
-pytest itself and report nothing useful; out here it is an exit code.
+Separate process for two reasons. The failure class here aborts rather than
+raises, and in-process that kills pytest and reports nothing. And rumps wraps
+every Timer callback in its own try/except (rumps.py:997), so an assertion
+inside a timer is swallowed and the run finishes green regardless. Nothing here
+asserts. It records what it saw, writes after every step, and lets the parent do
+the judging.
 
-The second reason is subtler and cost this project several review rounds in
-another form. rumps wraps every Timer callback in its own try/except
-(rumps.py:997), so an assertion inside a timer is swallowed and the run finishes
-green regardless. Nothing here asserts. It records what it observed, writes the
-file, and lets the parent process do the judging.
+What this deliberately does NOT claim: that AppKit drew anything. A Python-level
+wrapper on drawRect_ intercepts a direct Python call but not AppKit's own
+dispatch, which resolves the selector through the ObjC runtime, so there is no
+honest way to observe a real draw from here. An earlier version walked the view
+tree collecting class names and called that "drew", which the views satisfied by
+merely existing: deleting the display() call left it green.
+tests/unit/test_view_initialisers.py already proves every custom view can draw.
+What this file adds is the real run loop, the real button and real Core Audio,
+and a drawRect_ that fails under all three shows up as a fired guard.
 """
 
 import json
+import os
 import sys
+import tempfile
 import time
 import traceback
 
-RESULTS_PATH = sys.argv[1]
-SRC = sys.argv[2]
-sys.path.insert(0, SRC)
-
-import rumps  # noqa: E402
-
-from overheard import state  # noqa: E402
-from overheard.app import TranscriberApp  # noqa: E402
-
 results = {
     "reached": [],
-    "popover_built": False,
+    "level_bars": {},
+    "sys_row_hidden_at_idle": None,
+    "record_button_enabled": None,
+    "record_button_has_callback": None,
     "state_after_record": None,
     "recorder_class": None,
     "recorder_is_multichannel": None,
-    "sys_row_hidden_at_idle": None,
-    "custom_views_drawn": [],
+    "recorder_start_error": None,
+    "terminal_state": None,
     "level_timer_running": False,
-    "level_bars": None,
+    "stop_button_enabled": None,
+    "state_after_stop": None,
     "error": None,
 }
 
+RESULTS_PATH = None
+
 
 def _write():
-    with open(RESULTS_PATH, "w") as f:
-        json.dump(results, f, indent=2)
+    """Atomically, and after every step.
 
+    After each step rather than only at quit, because the abort this file exists
+    to catch leaves whatever is on disk as the entire diagnosis. An earlier
+    version wrote only at the end, so a run that died drawing reported "stages
+    reached: []" and looked identical to one that never started.
 
-def _draw_everything(app):
-    """Force the views to draw, which is where the app used to die.
-
-    Ordering the panel front does not guarantee a draw pass inside a short-lived
-    test process, and "it did not crash" is worth nothing if nothing was ever
-    rendered. displayIfNeeded drives the same drawRect_ path AppKit would.
+    Atomic because an abort landing inside json.dump would otherwise leave
+    truncated JSON, and the parent's json.loads then raises instead of
+    reporting the crash it was called to report.
     """
-    from overheard import popover as popover_module
-
-    panel = app._popover._panel
-    panel.contentView().display()
-
-    drawn = []
-
-    def walk(view):
-        if type(view).__module__ == popover_module.__name__:
-            drawn.append(type(view).__name__)
-        for sub in view.subviews() or []:
-            walk(sub)
-
-    walk(panel.contentView())
-    return sorted(set(drawn))
+    directory = os.path.dirname(RESULTS_PATH)
+    fd, tmp = tempfile.mkstemp(dir=directory, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(results, f, indent=2)
+        os.replace(tmp, RESULTS_PATH)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
-def _initialisers_really_ran(app):
-    """Did _LevelBar.initWithFrame_ actually run on every instance.
+def _level_bar_state(app):
+    """Whether each level bar ran its own initialiser, reported by role.
 
-    vars() and not hasattr, and the distinction is the whole point. _LevelBar
-    carries class-level _level and _active defaults as a second layer of
-    defence, so hasattr is True even when no initialiser ran at all and the
-    original bug is fully present. Only the instance dict tells them apart.
+    vars() and not hasattr: _LevelBar carries class-level _level and _active
+    defaults as a second layer of defence, so hasattr is True even when no
+    initialiser ran and the original SIGTRAP bug is fully present. Only the
+    instance dict separates the two.
 
-    This matters more than it looks. drawRect_ is wrapped in objc_safe now, so
-    the original crash no longer aborts the process: it is caught, logged and
-    turned into a no-op. That makes "the app survived" almost unfalsifiable
-    here, and this is the observable that is left.
+    Read BEFORE _set_state, and by role rather than as a count. _set_state
+    reaches _set_meters_visible, which calls setActive_ on both bars and
+    setLevel_ on the mic bar, and every one of those writes to the instance
+    dict. An earlier version read after _set_state while claiming in a comment
+    that only initWithFrame_ could have run: the mic bar then passed on the
+    strength of those setters and only the sys bar still failed, so the check
+    survived at half strength with its own comment denying it.
     """
-    from overheard.popover import _LevelBar
-
-    bars = []
-
-    def walk(view):
-        if isinstance(view, _LevelBar):
-            bars.append(view)
-        for sub in view.subviews() or []:
-            walk(sub)
-
-    walk(app._popover._panel.contentView())
+    popover = app._popover
     return {
-        "count": len(bars),
-        "with_instance_state": sum(
-            1 for bar in bars if "_level" in vars(bar) and "_active" in vars(bar)
-        ),
+        role: sorted(
+            key for key in ("_level", "_active") if key in vars(getattr(popover, attr))
+        )
+        for role, attr in (("mic", "_mic_bar"), ("sys", "_sys_bar"))
     }
 
 
@@ -110,85 +102,151 @@ class Driver:
     """One repeating timer, stepping on elapsed time.
 
     NOT one timer per step. ``rumps.Timer`` fires immediately on start and then
-    repeats, so a timer set to quit the app after 40 seconds quits it at t=0.
-    That trap has cost this project an hour once already. A single repeating
-    timer that reads the clock itself cannot be fooled by it.
+    repeats, so a quit timer set to 40 seconds quits the app at t=0. That has
+    cost this project an hour once already. A single repeating timer that reads
+    the clock itself cannot be fooled by it.
     """
+
+    # Waiting for the recorder is condition-driven rather than a fixed sleep.
+    # The first tap start on a machine can block on the system audio permission
+    # dialog, and a fixed deadline turns that into "expected TapRecorder, got
+    # None", which diagnoses nothing. This cap only bounds the hang.
+    RECORDER_WAIT = 45.0
 
     def __init__(self, app):
         self.app = app
         self.started = None
         self.done = set()
+        self.pressed_at = None
 
     def __call__(self, timer):
+        import rumps
+
         now = time.monotonic()
         if self.started is None:
             self.started = now
-        elapsed = now - self.started
 
         try:
-            self.step(elapsed)
+            self.step(now - self.started, now)
         except Exception:
             results["error"] = traceback.format_exc()
-            _write()
-            rumps.quit_application()
+            self._quit(rumps)
 
-    def step(self, elapsed):
+    def _quit(self, rumps):
+        # Leave nothing running: an abandoned tap holds a Core Audio device and
+        # an abandoned live transcriber holds a second helper process.
+        try:
+            if self.app._recorder is not None:
+                self.app._recorder.stop()
+        except Exception:
+            pass
+        _write()
+        rumps.quit_application()
+
+    def step(self, elapsed, now):
+        import rumps
+
+        from overheard import state
+
         app = self.app
 
-        if elapsed >= 0.0 and "build" not in self.done:
+        if "build" not in self.done:
             self.done.add("build")
-            # Exactly what main() does, including the order.
             app._build_popover()
+            # Before _set_state, which writes to both bars through its setters.
+            results["level_bars"] = _level_bar_state(app)
             app._set_state(state.IDLE, "Ready")
             app._popover._show()
-            results["popover_built"] = app._popover is not None
             results["sys_row_hidden_at_idle"] = bool(app._popover._sys_row.isHidden())
-            # Read BEFORE Record is pressed. setLevel_ and setActive_ both
-            # assign to the instance, and the level timer runs throughout a
-            # recording, so after that point the instance dict is populated
-            # whether or not the initialiser ever ran. Observed here, only
-            # initWithFrame_ can have put anything there.
-            results["level_bars"] = _initialisers_really_ran(app)
+            button = app._popover._btn_record
+            results["record_button_enabled"] = bool(button._enabled)
+            results["record_button_has_callback"] = button._callback is not None
             results["reached"].append("built")
+            _write()
 
         elif elapsed >= 1.0 and "record" not in self.done:
             self.done.add("record")
-            # The real entry point. _on_record defers the CoreAudio work to a
-            # 0.05s timer and then polls a worker thread, so nothing is ready
-            # yet when this returns; that is why the check waits.
-            app._on_record()
+            self.pressed_at = now
+            # The real control, not app._on_record(). Calling the handler
+            # directly skips callbacks.get("record") in _build_popover and the
+            # _enabled gate in mouseDown_, so a Record button wired to nothing
+            # at all passed every assertion in this file.
+            app._popover._btn_record.mouseDown_(None)
             results["reached"].append("pressed record")
+            _write()
 
-        elif elapsed >= 5.0 and "observe" not in self.done:
+        elif "record" in self.done and "observe" not in self.done:
+            waited = now - self.pressed_at
+            started = app._recorder is not None
+            failed = app._pending_recorder_error is not None
+            if not (started or failed or waited >= self.RECORDER_WAIT):
+                return
+
             self.done.add("observe")
+            results["terminal_state"] = (
+                "started" if started else "failed" if failed else "still pending"
+            )
+            results["recorder_start_error"] = app._pending_recorder_error
             results["state_after_record"] = app._state
             recorder = app._recorder
             results["recorder_class"] = type(recorder).__name__ if recorder else None
             if recorder is not None:
                 results["recorder_is_multichannel"] = bool(recorder.is_multichannel)
             results["level_timer_running"] = app._level_timer is not None
-            results["custom_views_drawn"] = _draw_everything(app)
+            results["stop_button_enabled"] = bool(app._popover._btn_stop._enabled)
             results["reached"].append("observed")
+            _write()
 
-        elif elapsed >= 7.0 and "stop" not in self.done:
+        elif "observe" in self.done and "stop" not in self.done:
             self.done.add("stop")
-            if app._recorder is not None:
-                app._recorder.stop()
+            # The real Stop control too, and for the same reason. This reaches
+            # _on_stop, where the recorder is torn down.
+            app._popover._btn_stop.mouseDown_(None)
+            results["state_after_stop"] = app._state
             results["reached"].append("stopped")
+            _write()
 
-        elif elapsed >= 8.5 and "quit" not in self.done:
+        elif "stop" in self.done and "quit" not in self.done:
             self.done.add("quit")
             results["reached"].append("quit")
-            _write()
-            rumps.quit_application()
+            self._quit(rumps)
 
 
 def main():
-    _write()  # so an abort is distinguishable from never having started
+    global RESULTS_PATH
+
+    RESULTS_PATH = sys.argv[1]
+    src = sys.argv[2]
+    config_dir = sys.argv[3]
+    sys.path.insert(0, src)
+
+    # Config isolation, before anything reads it. Without this the run is
+    # decided by the developer's own settings: capture_backend chooses the
+    # backend this test asserts on, and live_preview defaults True, which starts
+    # a Parakeet load, spawns a second helper for diarize-stream and puts a live
+    # transcript window on screen mid-test, none of it asserted and none of it
+    # torn down.
+    from pathlib import Path
+
+    from overheard import settings
+
+    settings.CONFIG_DIR = Path(config_dir)
+    settings.CONFIG_PATH = Path(config_dir) / "config.json"
+    settings.CONFIG_PATH.write_text(json.dumps({
+        "capture_backend": "tap",
+        "live_preview": False,
+        "speaker_memory": False,
+    }))
+
+    import rumps
+
+    from overheard.app import TranscriberApp
+
+    _write()  # so an abort before the first step is distinguishable
     app = TranscriberApp()
     rumps.Timer(Driver(app), 0.25).start()
     app.run()
 
 
-main()
+if __name__ == "__main__":
+    main()
