@@ -14,11 +14,69 @@ dependencies = [
     "sounddevice>=0.5.0",
     "soundfile>=0.13.0",
     "numpy>=1.24.0",
-    "whisperx>=3.1.0",
+    "parakeet-mlx>=0.3.0",
+    "scipy>=1.11.0",
 ]
+
+# Diarization and ASR both run through bundled native code, so neither torch
+# nor a Hugging Face account is needed anywhere. The optional whisper and
+# pyannote extras were removed with the single-engine cut, which is what keeps
+# torch out of the standalone bundle entirely.
+[project.optional-dependencies]
+dev = ["pytest>=7.0.0", "pytest-cov>=4.0.0", "mypy>=1.11", "ruff>=0.6"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Unit tests must stay hermetic and fast: no models, no helper binary, no
+# network. Integration tests need the built helper and downloaded models, and
+# skip themselves when those are absent so a fresh checkout still passes.
+markers = [
+    "integration: needs the built helper, downloaded models, or `say`",
+]
+addopts = "-q --strict-markers"
+
+[tool.coverage.run]
+source = ["overheard"]
+# AppKit view construction and Core Audio device setup need a real window server
+# or real hardware. Including them only produces a misleading denominator; they
+# are covered by the integration smoke tests and by running the app.
+omit = [
+    "*/app.py",
+    "*/popover.py",
+    "*/preferences.py",
+    "*/details_panel.py",
+    "*/live_panel.py",
+    "*/cal.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+
+[tool.mypy]
+files = ["src/overheard"]
+python_version = "3.11"
+ignore_missing_imports = true
+# Without this, method bodies with no annotations are skipped entirely, which
+# is most of the AppKit code. A reviewer proved the gap by deleting an import
+# and watching mypy stay green while pyflakes caught it instantly.
+check_untyped_defs = true
 
 [project.scripts]
 overheard = "overheard.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+src = ["src"]
+
+[tool.ruff.lint]
+# F is pyflakes: undefined names, unused imports, shadowed definitions. It
+# catches the class of bug that shipped twice in this repo (a name used in a
+# method that never imported it) in milliseconds, and it catches it whether or
+# not the function carries type annotations.
+select = ["F"]

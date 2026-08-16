@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
@@ -42,7 +43,7 @@ def _device_has_signal(device_id: int) -> bool:
 def find_recording_device(preferred: str = DEFAULT_DEVICE_NAME) -> int | None:
     """Find the best available recording device with fallback chain.
 
-    Uses the first device found by name — no signal test.
+    Uses the first device found by name, with no signal test.
     Signal testing was unreliable: BlackHole is silent when nothing plays,
     and aggregate devices may return zeros on first TCC access.
     """
@@ -72,8 +73,8 @@ class Recorder:
     mono if the device reports fewer channels.
 
     Channel layout convention for 3-channel aggregate:
-        ch 0, 1 — system audio (BlackHole)
-        ch 2    — microphone
+        ch 0, 1: system audio (BlackHole)
+        ch 2   : microphone
     """
 
     # Minimum channel count to attempt multi-channel recording
@@ -83,7 +84,7 @@ class Recorder:
         self.device_id = device_id
 
         # Detect actual channel count and native sample rate from device.
-        # CoreAudio aggregate devices do not support rate conversion — opening
+        # CoreAudio aggregate devices do not support rate conversion, so opening
         # at a non-native rate crashes PortAudio at the C level.  Record at
         # the device's native rate; WhisperX resamples to 16 kHz on load.
         try:
@@ -96,20 +97,31 @@ class Recorder:
 
         if avail >= self._MIN_MULTICHANNEL:
             self.channels = avail
-            self._is_multichannel = True
-            self._channels_info: dict | None = {
+            self.is_multichannel = True
+            self.channels_info: dict | None = {
                 "mic_channel": avail - 1,
                 "system_channels": list(range(avail - 1)),
             }
         else:
             self.channels = channels
-            self._is_multichannel = False
-            self._channels_info = None
+            self.is_multichannel = False
+            self.channels_info = None
 
         self._chunks: list[np.ndarray] = []
-        self._stream: sd.InputStream | None = None
         self._paused: bool = False
-        self._level_buf: np.ndarray | None = None  # last N frames for metering
+        self._level_buf: np.ndarray | None = None  # last captured block for metering
+        self._stop_event: threading.Event | None = None
+        self._thread: threading.Thread | None = None
+        self._tap = None   # optional callable fed every captured block
+
+    def set_tap(self, tap) -> None:
+        """Register a callable receiving every captured block, or None to clear.
+
+        Used to drive live transcription. The tap runs on the recording thread,
+        so it must return quickly and must not raise; exceptions are swallowed
+        so a fault in the tap can never interrupt the recording itself.
+        """
+        self._tap = tap
 
     def pause(self) -> None:
         self._paused = True
@@ -118,45 +130,75 @@ class Recorder:
         self._paused = False
 
     def start(self) -> None:
+        """Start recording in a background thread using blocking reads.
+
+        Using a PortAudio callback (the previous approach) required the GIL to
+        be acquired inside CoreAudio's realtime I/O thread.  When AppKit holds
+        the GIL during event processing, that blocks the realtime thread long
+        enough for CoreAudio's watchdog to fire SIGTRAP.
+
+        Blocking stream.read() in a normal Python thread sidesteps this: the
+        GIL is released while waiting for audio data, so there is no realtime
+        constraint and no GIL conflict with AppKit.
+        """
         self._chunks = []
         self._paused = False
         self._level_buf = None
+        self._stop_event = threading.Event()
 
-        def callback(indata, frames, time, status):
-            if status:
-                print(f"Audio: {status}", file=sys.stderr)
-            if not self._paused:
-                data = indata.copy()
-                self._chunks.append(data)
-                # Keep a rolling window for level metering
-                self._level_buf = data
+        block = 1024   # frames per read (~23 ms at 44100 Hz)
 
-        self._stream = sd.InputStream(
-            device=self.device_id,
-            channels=self.channels,
-            samplerate=self.sample_rate,
-            callback=callback,
-        )
-        self._stream.start()
+        stop_event = self._stop_event   # bound once: stop() clears the attribute
+
+        def _record_loop():
+            try:
+                with sd.InputStream(
+                    device=self.device_id,
+                    channels=self.channels,
+                    samplerate=self.sample_rate,
+                    blocksize=block,
+                ) as stream:
+                    while not stop_event.is_set():
+                        data, overflowed = stream.read(block)
+                        if overflowed:
+                            print("Audio: input overflow", file=sys.stderr)
+                        if not self._paused:
+                            chunk = data.copy()
+                            self._chunks.append(chunk)
+                            self._level_buf = chunk
+                            tap = self._tap
+                            if tap is not None:
+                                try:
+                                    tap(chunk)
+                                except Exception as e:
+                                    # Never let a tap fault interrupt recording
+                                    print(f"Audio: tap error: {e}", file=sys.stderr)
+            except Exception:
+                import traceback
+                print(f"Recording thread error:\n{traceback.format_exc()}", file=sys.stderr)
+
+        self._thread = threading.Thread(target=_record_loop, daemon=True)
+        self._thread.start()
 
     def stop(self) -> tuple[np.ndarray | None, dict | None]:
-        """Stop recording.
+        """Stop recording and return (audio_array, channels_info).
 
-        Returns:
-            (audio_array, channels_info) where channels_info is either
-            {"mic_channel": int, "system_channels": [int, ...]} for multichannel,
-            or None for mono.
+        channels_info is {"mic_channel": int, "system_channels": [int, ...]}
+        for multichannel recordings, or None for mono.
         """
-        if self._stream:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+        if self._stop_event:
+            self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=3.0)
+            self._thread = None
+        self._stop_event = None
+
         if not self._chunks:
             return None, None
         audio = np.concatenate(self._chunks, axis=0)
         self._chunks = []
         self._level_buf = None
-        return audio, self._channels_info
+        return audio, self.channels_info
 
     def get_levels(self) -> tuple[float, float]:
         """Return (mic_rms, system_rms) from the last captured audio buffer.
@@ -168,9 +210,9 @@ class Recorder:
         if buf is None or len(buf) == 0:
             return 0.0, 0.0
 
-        if self._is_multichannel and self._channels_info is not None:
-            mic_ch = self._channels_info["mic_channel"]
-            sys_chs = self._channels_info["system_channels"]
+        if self.is_multichannel and self.channels_info is not None:
+            mic_ch = self.channels_info["mic_channel"]
+            sys_chs = self.channels_info["system_channels"]
             mic_rms = float(np.sqrt(np.mean(buf[:, mic_ch] ** 2)))
             if sys_chs:
                 sys_data = buf[:, sys_chs]
@@ -178,7 +220,7 @@ class Recorder:
             else:
                 sys_rms = mic_rms
         else:
-            # Mono — collapse to single channel
+            # Mono: collapse to single channel
             mono = buf[:, 0] if buf.ndim > 1 else buf
             rms = float(np.sqrt(np.mean(mono ** 2)))
             mic_rms = sys_rms = rms
@@ -350,7 +392,7 @@ def _run_swift_snippet(code: str) -> tuple[bool, str]:
         if output == "CREATED":
             return True, "Created successfully"
         if output == "MISSING_DEVICES":
-            return False, "Required devices not found — is BlackHole 2ch installed?"
+            return False, "Required devices not found. Is BlackHole 2ch installed?"
         if result.returncode != 0:
             err = (result.stderr or output)[:200]
             return False, f"Error: {err}"
@@ -358,7 +400,7 @@ def _run_swift_snippet(code: str) -> tuple[bool, str]:
     except subprocess.TimeoutExpired:
         return False, "Timed out"
     except FileNotFoundError:
-        return False, "swift not found — create device manually in Audio MIDI Setup"
+        return False, "swift not found. Create the device manually in Audio MIDI Setup."
     finally:
         os.unlink(path)
 

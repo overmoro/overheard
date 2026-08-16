@@ -1,50 +1,23 @@
-"""Config read/write helper for overheard.
+"""Compatibility surface over :mod:`overheard.settings`.
 
-Config is stored at ~/.config/overheard/config.json.
+The schema, the defaults and the file I/O all live in ``settings``. This module
+exists so the many ``from overheard import config as cfg`` / ``cfg.get(...)``
+call sites keep reading naturally, and so there is one obvious place to look
+when following an old reference.
+
+``CONFIG_DIR`` and ``CONFIG_PATH`` deliberately do *not* appear here any more.
+Re-exporting them would create two names for one path, and patching the copy
+would silently fail to redirect the real reads. They live in ``settings``.
 """
 
-import json
-import os
-from pathlib import Path
+from overheard.settings import (
+    DEFAULTS,
+    Settings,
+    get,
+    load,
+    load_dict,
+    save,
+    set_value,
+)
 
-CONFIG_DIR = Path.home() / ".config" / "overheard"
-CONFIG_PATH = CONFIG_DIR / "config.json"
-
-DEFAULTS = {
-    "output_dir": str(Path.home() / "overheard" / "transcripts"),
-    "obsidian_enabled": False,
-    "obsidian_vault": "",
-    "obsidian_inbox": "01_Inbox",
-    "local_speaker_name": "Don",
-}
-
-
-def load() -> dict:
-    """Load config from disk, merging with defaults."""
-    if CONFIG_PATH.exists():
-        try:
-            with open(CONFIG_PATH) as f:
-                data = json.load(f)
-            return {**DEFAULTS, **data}
-        except (json.JSONDecodeError, OSError):
-            pass
-    return dict(DEFAULTS)
-
-
-def save(data: dict) -> None:
-    """Write config to disk, merging with any existing values."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    current = load()
-    current.update(data)
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(current, f, indent=2)
-
-
-def get(key: str, default=None):
-    """Get a single config value."""
-    return load().get(key, default)
-
-
-def set_value(key: str, value) -> None:
-    """Set a single config value and persist it."""
-    save({key: value})
+__all__ = ["DEFAULTS", "Settings", "get", "load", "load_dict", "save", "set_value"]

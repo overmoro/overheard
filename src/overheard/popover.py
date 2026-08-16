@@ -1,9 +1,14 @@
-"""Overheard — menu bar popover transport UI."""
+"""Overheard: menu bar popover transport UI."""
 
 import math
+import sys
+from typing import Any
 
 import objc
 from AppKit import (
+    NSApplication,
+    NSMenu,
+    NSMenuItem,
     NSBackingStoreBuffered,
     NSButton,
     NSColor,
@@ -22,13 +27,16 @@ from AppKit import (
 )
 from Foundation import NSAttributedString, NSObject, NSTimer
 
+from overheard.state import IDLE, PAUSED, RECORDING, TRANSCRIBING
+from overheard.objc_safety import objc_safe, objc_safe_noarg
+
 # ---------------------------------------------------------------------------
 # Geometry
 # ---------------------------------------------------------------------------
 POP_W   = 300
 POP_H   = 210
 _HDR_H  = 52
-_BODY_H = POP_H - _HDR_H   # 158 — available body height
+_BODY_H = POP_H - _HDR_H   # 158, available body height
 
 _BTN_D   = 50    # button circle diameter (collapsed)
 _BTN_EW  = 90    # button frame width (expanded pill)
@@ -48,7 +56,7 @@ _M_BAR_W   = POP_W - _M_BAR_X - _M_PAD_R          # = 240
 _TRACK_OPTS = 0x01 | 0x02 | 0x80
 
 # ---------------------------------------------------------------------------
-# Layout — computed top-down through the body.
+# Layout, computed top-down through the body.
 #
 # AppKit coordinate system: y=0 at bottom of view, increases upward.
 # Every constant below is the BOTTOM EDGE y of that element in the body
@@ -80,8 +88,26 @@ _ROW_BAR_Y = (_ROW_H - _M_H) // 2  # = 3  (8px bar centred in 14px row)
 # ---------------------------------------------------------------------------
 
 class _LevelBar(NSView):
-    def init(self):
-        self = objc.super(_LevelBar, self).init()
+    """A segmented level meter.
+
+    The defaults below are class attributes, and the initialiser overrides
+    ``initWithFrame_`` rather than ``init``, for the same reason: this view is
+    built with ``alloc().initWithFrame_(...)``, and ``initWithFrame:`` is
+    NSView's designated initialiser. An ``init`` override is simply never
+    reached down that path, so the instance attributes were never assigned.
+
+    The consequence was not a quiet default. ``drawRect_`` raised
+    AttributeError the first time the view was asked to draw, which happens
+    inside AppKit's drawing machinery, where an unhandled Python exception
+    aborts the process. Pressing Record unhid the system meter row, the row
+    drew for the first time, and Overheard died with SIGTRAP and no traceback.
+    """
+
+    _level = 0.0
+    _active = False
+
+    def initWithFrame_(self, frame):
+        self = objc.super(_LevelBar, self).initWithFrame_(frame)
         if self is None:
             return None
         self._level  = 0.0
@@ -96,6 +122,7 @@ class _LevelBar(NSView):
         self._active = bool(v)
         self.setNeedsDisplay_(True)
 
+    @objc_safe
     def drawRect_(self, rect):
         from AppKit import NSBezierPath
         b  = self.bounds()
@@ -150,8 +177,28 @@ class _PillButton(NSView):
             )
         )
 
+    @objc_safe_noarg
     def updateTrackingAreas(self):
-        self._setup_tracking()
+        """AppKit calls this on every bounds change, window move and resize.
+
+        _setup_tracking builds an NSTrackingArea from the current bounds, and a
+        degenerate rect during a live resize makes addTrackingArea_ raise. The
+        inner try below is what catches that, and it is deliberately narrow: it
+        reports the failure and lets the method carry on to super().
+
+        The decorator is the outer net, not the handler for the case above. It
+        covers the objc.super() call, the print, and anything added here later.
+        Since AppKit dispatches this method directly, anything escaping it
+        aborts the process, which is why both layers are here.
+
+        super() is called outside the guarded helper deliberately: AppKit needs
+        it whether or not our own tracking setup worked, and skipping it would
+        trade a crash for a view that stops receiving mouse events.
+        """
+        try:
+            self._setup_tracking()
+        except Exception as e:
+            print(f"[overheard] tracking area setup failed: {e}", file=sys.stderr)
         objc.super(_PillButton, self).updateTrackingAreas()
 
     # ---- State --------------------------------------------------------
@@ -162,10 +209,12 @@ class _PillButton(NSView):
 
     # ---- Mouse events -------------------------------------------------
 
+    @objc_safe
     def mouseEntered_(self, event):
         self._expanding = True
         self._ensure_timer()
 
+    @objc_safe
     def mouseExited_(self, event):
         self._expanding = False
         self._ensure_timer()
@@ -173,6 +222,7 @@ class _PillButton(NSView):
     def acceptsFirstResponder(self):
         return True
 
+    @objc_safe
     def mouseDown_(self, event):
         if self._enabled and self._callback:
             self._callback()
@@ -185,6 +235,7 @@ class _PillButton(NSView):
                 1.0 / 60.0, self, "onAnimTick:", None, True
             )
 
+    @objc_safe
     def onAnimTick_(self, timer):
         step = (1.0 / 60.0) / 0.18   # 0.18 s transition
         if self._expanding:
@@ -198,6 +249,7 @@ class _PillButton(NSView):
 
     # ---- Drawing ------------------------------------------------------
 
+    @objc_safe
     def drawRect_(self, rect):
         from AppKit import NSBezierPath
         t  = self._progress
@@ -241,18 +293,26 @@ class _PillButton(NSView):
 class _DragHeader(NSView):
     """Header view that drags the parent NSPanel when clicked and dragged."""
 
-    def init(self):
-        self = objc.super(_DragHeader, self).init()
+    # Same designated-initialiser trap as _LevelBar: this view is built with
+    # initWithFrame_, so an init override would never run.
+    _drag_start = None
+    _drag_event_loc = None
+
+    def initWithFrame_(self, frame):
+        self = objc.super(_DragHeader, self).initWithFrame_(frame)
         if self is None:
             return None
+        self._drag_start = None
         self._drag_event_loc = None
         return self
 
+    @objc_safe
     def drawRect_(self, rect):
         NSColor.colorWithWhite_alpha_(0.94, 1.0).setFill()
         from AppKit import NSBezierPath
         NSBezierPath.fillRect_(self.bounds())
 
+    @objc_safe
     def mouseDown_(self, event):
         # Record the panel origin at drag start in screen coords
         win = self.window()
@@ -260,9 +320,13 @@ class _DragHeader(NSView):
             self._drag_start = win.frame().origin
             self._drag_event_loc = event.locationInWindow()
 
+    @objc_safe
     def mouseDragged_(self, event):
         win = self.window()
-        if win is None or self._drag_start is None:
+        # Both are set together in mouseDown_, so checking only _drag_start and
+        # then dereferencing _drag_event_loc was a guard that did not cover what
+        # it guarded.
+        if win is None or self._drag_start is None or self._drag_event_loc is None:
             return
         loc    = event.locationInWindow()
         dx     = loc.x - self._drag_event_loc.x
@@ -270,6 +334,7 @@ class _DragHeader(NSView):
         origin = win.frame().origin
         win.setFrameOrigin_((origin.x + dx, origin.y + dy))
 
+    @objc_safe
     def mouseUp_(self, event):
         self._drag_start = None
 
@@ -330,8 +395,9 @@ class _PopoverDelegate(NSObject):
         self._toggle_cb = None   # set by TransportPopover after build
         return self
 
+    @objc_safe
     def togglePanel_(self, sender):
-        from AppKit import NSApplication, NSEventTypeRightMouseDown
+        from AppKit import NSEventTypeRightMouseDown
         event = NSApplication.sharedApplication().currentEvent()
         if event is not None and event.type() == NSEventTypeRightMouseDown:
             self._show_context_menu(sender)
@@ -340,7 +406,6 @@ class _PopoverDelegate(NSObject):
                 self._toggle_cb()
 
     def _show_context_menu(self, sender):
-        from AppKit import NSMenu, NSMenuItem
         menu = NSMenu.alloc().init()
 
         show_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -357,27 +422,34 @@ class _PopoverDelegate(NSObject):
         quit_item.setTarget_(self)
         menu.addItem_(quit_item)
 
-        # Show at the status bar button position
-        sender.popUpContextMenu_withEvent_forView_(
+        # Class method on NSMenu, not an instance method on the button.
+        # Sending it to the status item button raises AttributeError, which is
+        # how this path stayed broken after the missing import was fixed: the
+        # menu was built and then thrown away one line later.
+        NSMenu.popUpContextMenu_withEvent_forView_(
             menu,
             NSApplication.sharedApplication().currentEvent(),
             sender,
         )
 
+    @objc_safe
     def showPanel_(self, sender):
         if self._toggle_cb:
             self._toggle_cb()
 
+    @objc_safe
     def openTranscripts_(self, sender):
         cb = self._cbs.get("open_transcripts")
         if cb:
             cb()
 
+    @objc_safe
     def openPreferences_(self, sender):
         cb = self._cbs.get("preferences")
         if cb:
             cb()
 
+    @objc_safe
     def quitApp_(self, sender):
         import rumps
         rumps.quit_application()
@@ -391,16 +463,33 @@ class TransportPopover:
 
     def __init__(self, callbacks: dict):
         self._delegate        = _PopoverDelegate.alloc().initWithCallbacks_(callbacks)
-        self._panel           = None
-        self._status_btn      = None   # status bar button (for positioning)
-        self._btn_record      = None
-        self._btn_pause       = None
-        self._btn_stop        = None
-        self._status_lbl      = None
-        self._mic_bar         = None
-        self._sys_bar         = None
-        self._mic_row         = None
-        self._sys_row         = None
+        # Framework handles, genuinely untyped. Filled in by _build below.
+        self._panel:      Any = None
+        self._status_btn: Any = None   # status bar button (for positioning)
+        self._status_lbl: Any = None
+
+        # Views _build always assigns, declared without a value: _build runs
+        # before __init__ returns, so None is not a state this object is ever
+        # observed in. Annotating them Optional instead would demand None checks
+        # guarding a case that cannot occur.
+        #
+        # The two meter rows belong here and not above. They are assigned in the
+        # same block of _build as the bars they contain, so the argument that
+        # removed the bars' falsiness guards applies to them verbatim. Leaving
+        # them defaulted to None was what kept two `if self._sys_row:` guards
+        # alive next to a comment explaining that such guards cannot fire.
+        self._mic_row:    Any
+        self._sys_row:    Any
+        #
+        # This does not make mypy check method names on them. _PillButton and
+        # _LevelBar subclass NSView, which PyObjC leaves untyped, so every
+        # attribute on them reads as valid however it is spelled. A misspelled
+        # setter here is caught by running the code, and by nothing else.
+        self._btn_record: _PillButton
+        self._btn_pause:  _PillButton
+        self._btn_stop:   _PillButton
+        self._mic_bar:    _LevelBar
+        self._sys_bar:    _LevelBar
         self._is_multichannel = False
         self._build(callbacks)
 
@@ -427,11 +516,12 @@ class TransportPopover:
             return
         x, y = self._panel_origin(btn)
         self._panel.setFrameOrigin_((x, y))
-        # LSUIElement apps (no dock icon) must be explicitly activated before
-        # makeKeyAndOrderFront_ — otherwise windowDidResignKey_ fires immediately.
-        from AppKit import NSApplication
-        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-        self._panel.makeKeyAndOrderFront_(None)
+        # orderFront_ rather than makeKeyAndOrderFront_: the transport panel
+        # doesn't need to be the key window (no text input, just buttons).
+        # Avoiding makeKeyAndOrderFront_ + activateIgnoringOtherApps_ prevents
+        # the activation/deactivation cycle that caused the panel to
+        # immediately auto-hide on first click (LSUIElement apps deactivate fast).
+        self._panel.orderFront_(None)
 
     def _panel_origin(self, btn):
         """Return (x, y) screen origin so the panel sits flush below btn."""
@@ -448,7 +538,6 @@ class TransportPopover:
         # Fallback: top-right of main screen (reasonable for menu bar items)
         from AppKit import NSScreen
         sf = NSScreen.mainScreen().frame()
-        mbar_h = NSScreen.mainScreen().visibleFrame().size.height
         y = sf.size.height - POP_H   # just below top of screen
         x = sf.size.width - POP_W - 8
         return x, y
@@ -458,8 +547,6 @@ class TransportPopover:
             self._panel.orderOut_(None)
 
     def set_state(self, state, status=""):
-        from overheard.transport import IDLE, RECORDING, PAUSED, TRANSCRIBING
-
         enabled = {
             IDLE:         (True,  False, False),
             RECORDING:    (False, True,  True),
@@ -480,9 +567,6 @@ class TransportPopover:
             self.set_levels(0.0, 0.0)
 
     def set_levels(self, mic_rms, sys_rms):
-        if not self._mic_bar:
-            return
-
         def _db(rms):
             if rms <= 0:
                 return 0.0
@@ -490,22 +574,36 @@ class TransportPopover:
             return max(0.0, min(1.0, (db + 60) / 60))
 
         self._mic_bar.setLevel_(_db(mic_rms))
-        if self._is_multichannel and self._sys_bar:
+        if self._is_multichannel:
             self._sys_bar.setLevel_(_db(sys_rms))
 
     def configure_channels(self, is_multichannel):
+        """Sole owner of the system meter row's visibility.
+
+        The row is shown exactly when the capture is multichannel, and this is
+        the only method that changes _is_multichannel, so it is the only one
+        that needs to touch the row. _set_meters_visible used to set it too,
+        from the same expression, which left it ambiguous which of the two was
+        responsible.
+        """
         self._is_multichannel = is_multichannel
-        if self._sys_row:
-            self._sys_row.setHidden_(not is_multichannel)
+        self._sys_row.setHidden_(not is_multichannel)
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
     def _set_meters_visible(self, v):
-        if self._mic_bar: self._mic_bar.setActive_(v)
-        if self._sys_bar: self._sys_bar.setActive_(v and self._is_multichannel)
-        if self._sys_row: self._sys_row.setHidden_(not self._is_multichannel)
+        # No falsiness guards here: _build always assigns these, and an NSView
+        # subclass is always truthy anyway, so the guards could never fire.
+        # Keeping them would have the code hedging against a case the
+        # annotation says cannot happen, leaving the next reader to decide
+        # which of the two to believe.
+        #
+        # The row's visibility is configure_channels' job. Setting it here as
+        # well, from the same expression, was the same ambiguity one level up.
+        self._mic_bar.setActive_(v)
+        self._sys_bar.setActive_(v and self._is_multichannel)
 
     def _build(self, callbacks):
         d = self._delegate
@@ -517,7 +615,7 @@ class TransportPopover:
         root_box.setBorderType_(0)
         root_box.setFillColor_(NSColor.windowBackgroundColor())
         root_box.setTitlePosition_(0)
-        root_box.setContentViewMargins_((0, 0))   # no inset — coordinates match frame
+        root_box.setContentViewMargins_((0, 0))   # no inset, so coordinates match frame
         root = root_box.contentView()
 
         # ---- Header (soft grey, draggable) ----------------------------------
@@ -534,7 +632,7 @@ class TransportPopover:
             size=10, color=NSColor.secondaryLabelColor(),
         ))
 
-        # Gear button — right-aligned, vertically centred in header
+        # Gear button: right-aligned, vertically centred in header
         _GEAR_SZ = 38
         gear = NSButton.alloc().initWithFrame_(
             NSMakeRect(POP_W - _GEAR_SZ - 10, (_HDR_H - _GEAR_SZ) // 2, _GEAR_SZ, _GEAR_SZ)
@@ -616,6 +714,13 @@ class TransportPopover:
         root.addSubview_(sys_row)
         self._sys_bar = sys_bar
         self._sys_row = sys_row
+        # Hidden until a recorder reports multichannel capture. configure_channels
+        # owns this afterwards, but it is only called from _poll_recorder_started,
+        # so between launch and the first successful record nothing would have
+        # set it. _set_meters_visible used to hide it as a side effect, which is
+        # what kept an idle popover from showing a dead system-audio meter under
+        # a speaker emoji on a machine that may never capture system audio.
+        sys_row.setHidden_(True)
 
         # ---- Wire as borderless NSPanel (no arrow) --------------------------
         panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -625,12 +730,13 @@ class TransportPopover:
             False,
         )
         # Add root_box as a subview of the panel's existing content view
-        # rather than replacing it — avoids compositing issues with transparent panels.
+        # rather than replacing it, which avoids compositing issues with transparent panels.
         panel_cv = panel.contentView()
         panel_cv.addSubview_(root_box)
         panel.setHasShadow_(True)
         panel.setLevel_(NSStatusWindowLevel + 1)
         panel.setFloatingPanel_(True)
+        panel.setHidesOnDeactivate_(False)   # don't auto-hide when LSUIElement app deactivates
 
         self._panel = panel
         self._delegate._toggle_cb = self.toggle

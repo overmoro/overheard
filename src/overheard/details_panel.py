@@ -1,4 +1,4 @@
-"""Meeting Details panel — shown after recording stops, before transcription begins."""
+"""Meeting Details panel, shown after recording stops and before transcription begins."""
 
 import re
 import threading
@@ -20,7 +20,10 @@ from AppKit import (
     NSTableView,
     NSTextField,
 )
-from Foundation import NSObject, NSMutableArray
+from Foundation import NSObject
+
+from overheard.objc_safety import objc_safe, objc_safe_returning
+from typing import Any
 
 try:
     from AppKit import (
@@ -54,7 +57,9 @@ class MeetingDetails:
     name: str
     source: str               # 'zoom', 'teams', 'meet', 'in-person', 'other'
     location: str
-    attendees: list[str]      # ordered — index maps to SPEAKER_00, SPEAKER_01...
+    # Ordered. The local speaker is identified from the mic track; the rest
+    # fill remaining speakers in order of first speech.
+    attendees: list[str]
     date: datetime = field(default_factory=datetime.now)
 
 
@@ -85,7 +90,7 @@ def _make_text_field(x: float, y: float, w: float, h: float, placeholder: str = 
 
 
 # ---------------------------------------------------------------------------
-# Table data source / delegate — handles attendee rows
+# Table data source / delegate: handles attendee rows
 # ---------------------------------------------------------------------------
 
 class _AttendeeDataSource(NSObject):
@@ -102,9 +107,11 @@ class _AttendeeDataSource(NSObject):
     def setRows_(self, rows: list[list[str]]) -> None:
         self._rows = rows
 
+    @objc_safe_returning(0)
     def numberOfRowsInTableView_(self, table_view) -> int:
         return len(self._rows)
 
+    @objc_safe_returning("")
     def tableView_objectValueForTableColumn_row_(self, table_view, column, row):
         if row >= len(self._rows):
             return ""
@@ -115,6 +122,7 @@ class _AttendeeDataSource(NSObject):
             return self._rows[row][1]
         return ""
 
+    @objc_safe_returning(None)
     def tableView_setObjectValue_forTableColumn_row_(self, table_view, value, column, row):
         if row >= len(self._rows):
             return
@@ -128,7 +136,7 @@ class _AttendeeDataSource(NSObject):
 
 
 # ---------------------------------------------------------------------------
-# Delegate — button actions
+# Delegate: button actions
 # ---------------------------------------------------------------------------
 
 class _DetailsDelegate(NSObject):
@@ -141,6 +149,7 @@ class _DetailsDelegate(NSObject):
         self._discard_callback = discard_callback
         return self
 
+    @objc_safe
     def onStartTranscription_(self, sender):
         name = self._name_field.stringValue().strip() or "meeting"
         source_idx = self._source_popup.indexOfSelectedItem()
@@ -161,6 +170,7 @@ class _DetailsDelegate(NSObject):
         if self._callback:
             threading.Thread(target=self._callback, args=(details,), daemon=True).start()
 
+    @objc_safe
     def onSourceChanged_(self, sender):
         """Auto-fill location when source changes."""
         idx = sender.indexOfSelectedItem()
@@ -170,13 +180,15 @@ class _DetailsDelegate(NSObject):
         if loc:
             self._location_field.setStringValue_(loc)
 
+    @objc_safe
     def onDiscard_(self, sender):
-        """First click — reveal the red confirm button."""
+        """First click: reveal the red confirm button."""
         self._confirm_discard_btn.setHidden_(False)
         sender.setEnabled_(False)
 
+    @objc_safe
     def onConfirmDiscard_(self, sender):
-        """Second click — actually discard the recording."""
+        """Second click: actually discard the recording."""
         self._window.orderOut_(None)
         # Reset discard button state for next time
         self._discard_btn.setEnabled_(True)
@@ -208,9 +220,31 @@ class DetailsPanel:
     def __init__(self, callback, discard_callback=None):
         self._callback = callback
         self._discard_callback = discard_callback
-        self._window = None
-        self._delegate = None
-        self._data_source = None
+        self._window: Any = None
+        self._delegate: "_DetailsDelegate | None" = None
+        self._data_source: "_AttendeeDataSource | None" = None
+        # Set as the very last statement of _build, so it means "_build ran to
+        # completion" and nothing weaker. _window and _delegate are both
+        # assigned in its first few lines and it runs for another hundred and
+        # more, so keying on either lets a failure past that point leave the
+        # panel believing it is built. Every later show() then dies on a widget
+        # the build never reached, permanently.
+        self._built = False
+
+    def _ensure_built(self) -> "tuple[_DetailsDelegate, _AttendeeDataSource]":
+        """Build on first use, and hand back the two objects show() needs.
+
+        Retries on every call until a build finishes, because a partially built
+        panel is not a panel. Raising rather than returning a half-populated
+        delegate keeps the AttributeError-inside-AppKit failure off the table;
+        the caller at the ObjC boundary turns this into a message.
+        """
+        if not self._built:
+            self._build()
+        delegate, data_source = self._delegate, self._data_source
+        if not self._built or delegate is None or data_source is None:
+            raise RuntimeError("the details panel failed to build")
+        return delegate, data_source
 
     def show(
         self,
@@ -220,29 +254,28 @@ class DetailsPanel:
         attendees: list[str] | None = None,
         speaker_count: int = 2,
     ) -> None:
-        if self._window is None:
-            self._build()
+        delegate, data_source = self._ensure_built()
 
         # Pre-fill fields
-        self._delegate._name_field.setStringValue_(name)
-        self._delegate._location_field.setStringValue_(location)
+        delegate._name_field.setStringValue_(name)
+        delegate._location_field.setStringValue_(location)
 
         # Set source popup
         display_label = next(
             (lbl for lbl, key in SOURCE_OPTIONS if key == source),
             "In-person",
         )
-        self._delegate._source_popup.selectItemWithTitle_(display_label)
+        delegate._source_popup.selectItemWithTitle_(display_label)
 
-        # Build attendee rows — pre-fill from calendar, pad to speaker_count
+        # Build attendee rows: pre-fill from calendar, pad to speaker_count
         rows = []
         attendees = attendees or []
         for i in range(max(speaker_count, len(attendees))):
             speaker_id = f"SPEAKER_{i:02d}"
             name_val = attendees[i] if i < len(attendees) else ""
             rows.append([speaker_id, name_val])
-        self._data_source.setRows_(rows)
-        self._delegate._table_view.reloadData()
+        data_source.setRows_(rows)
+        delegate._table_view.reloadData()
 
         self._window.makeKeyAndOrderFront_(None)
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
@@ -342,7 +375,7 @@ class DetailsPanel:
         cv.addSubview_(discard_btn)
         self._delegate._discard_btn = discard_btn
 
-        # Confirm discard — hidden until first click, red destructive style
+        # Confirm discard: hidden until first click, red destructive style
         confirm_btn = NSButton.alloc().initWithFrame_(NSMakeRect(128, y, 160, 32))
         confirm_btn.setTitle_("⚠️ Yes, delete it")
         confirm_btn.setBezelStyle_(1)
@@ -360,3 +393,7 @@ class DetailsPanel:
         btn.setTarget_(self._delegate)
         btn.setAction_("onStartTranscription:")
         cv.addSubview_(btn)
+
+        # Last statement in the method, deliberately. Anything above can fail,
+        # and until this runs the panel is not built.
+        self._built = True

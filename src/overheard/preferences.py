@@ -1,13 +1,13 @@
 """Preferences window for Overheard.
 
 Opens as a standalone NSPanel so it doesn't block the rumps run loop.
-Sections: Audio Setup, Hugging Face Token, Dependencies, Output Folder.
+Sections: General, Audio, Transcription, Output, Integrations.
 """
 
 import os
 import subprocess
+import sys
 import threading
-from pathlib import Path
 
 import objc
 from AppKit import (
@@ -25,14 +25,21 @@ from AppKit import (
     NSOpenPanel,
     NSView,
 )
-from Foundation import NSObject, NSString
+from Foundation import NSObject, NSRunLoopCommonModes, NSThread
 
 from overheard import config as cfg
 from overheard.audio import create_aggregate_device, create_multi_output_device
+from overheard.objc_safety import objc_safe
+from typing import Any
 
 # Window dimensions
 WIN_W = 500
-WIN_H = 360   # tabs keep each pane compact
+WIN_H = 460
+
+_ENGINE_BLURB = (
+    "Parakeet TDT 0.6B v3, on the Apple Silicon GPU. Detects its own language "
+    "across 25 European languages."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -98,8 +105,44 @@ def _make_text_field(x: float, y: float, w: float, h: float,
 
 
 # ---------------------------------------------------------------------------
-# Delegate — NSObject subclass handles all button actions
+# Delegate: NSObject subclass handles all button actions
 # ---------------------------------------------------------------------------
+
+def _set_label(label, text: str) -> None:
+    """Write to an AppKit label from any thread.
+
+    The download and device-creation workers run on daemon threads. Mutating an
+    NSTextField from one is undefined behaviour, and this app has already died
+    once from an exception crossing the ObjC boundary with no crash report, so
+    a worker's write is handed to the main thread instead.
+
+    On the main thread the write happens in place. Marshalling unconditionally
+    would queue even the main thread's own writes to a later run-loop pass, and
+    since _build no longer paints the status labels, show() would order the
+    window front with all three of them blank and fill them in a frame or more
+    later.
+    """
+    if NSThread.isMainThread():
+        label.setStringValue_(text)
+        return
+    _perform_on_main(label, "setStringValue:", text)
+
+
+def _perform_on_main(target, selector: str, argument) -> None:
+    """Queue a selector on the main thread, in every run-loop mode.
+
+    The plain asynchronous perform schedules in NSDefaultRunLoopMode only, so
+    anything it delivers is withheld while the main thread sits in a modal or
+    tracking mode. A user who clicks Download and then opens the Browse panel,
+    or just holds the mouse on the popover header, would see the progress label
+    freeze for the duration. A frozen label on a multi-gigabyte download is
+    exactly the "button that appears to have done nothing" that makes people
+    click again, which is what the download latch exists to survive.
+    """
+    target.performSelectorOnMainThread_withObject_waitUntilDone_modes_(
+        selector, argument, False, [NSRunLoopCommonModes]
+    )
+
 
 class _PreferencesDelegate(NSObject):
 
@@ -108,98 +151,301 @@ class _PreferencesDelegate(NSObject):
         if self is None:
             return None
         self._window = window
+        # A download owns the dependency label while it runs. Declared here so
+        # every path can read it without a getattr default standing in for an
+        # invariant that is supposed to hold.
+        self._downloading = False
+        # Incremented per download, so a finishing worker can tell whether the
+        # latch it is about to release is still its own.
+        self._download_generation = 0
         return self
 
     # ---- General -----------------------------------------------------------
 
+    @objc_safe
     def openTranscripts_(self, sender):
         from overheard import config as _cfg
         from pathlib import Path as _Path
-        d = _Path(_cfg.get("output_dir", str(_Path.home() / "overheard" / "transcripts")))
+        d = _Path(_cfg.get("output_dir"))
         d.mkdir(parents=True, exist_ok=True)
         os.system(f'open "{d}"')
 
+    @objc_safe
     def quitApp_(self, sender):
         import rumps
         rumps.quit_application()
 
     # ---- Audio Setup -------------------------------------------------------
 
+    @objc_safe
     def createRecordingDevice_(self, sender):
         self._aggregate_status.setStringValue_("Creating...")
         threading.Thread(target=self._do_create_aggregate, daemon=True).start()
 
     def _do_create_aggregate(self):
         ok, msg = create_aggregate_device()
-        self._aggregate_status.setStringValue_(f"{'✓' if ok else '✗'} {msg}")
+        _set_label(self._aggregate_status, f"{'✓' if ok else '✗'} {msg}")
 
+    @objc_safe
     def createMonitoringDevice_(self, sender):
         self._multiout_status.setStringValue_("Creating...")
         threading.Thread(target=self._do_create_multiout, daemon=True).start()
 
     def _do_create_multiout(self):
         ok, msg = create_multi_output_device()
-        self._multiout_status.setStringValue_(f"{'✓' if ok else '✗'} {msg}")
+        _set_label(self._multiout_status, f"{'✓' if ok else '✗'} {msg}")
 
-    # ---- HF Token ----------------------------------------------------------
+    # ---- Engine ------------------------------------------------------------
 
-    def saveToken_(self, sender):
-        token = self._token_field.stringValue().strip()
-        if not token:
-            self._token_status.setStringValue_("✗ Token is empty")
+    @objc_safe
+    def refreshStatusOnMain_(self, _ignored):
+        """ObjC entry point so a worker thread can request a refresh.
+
+        refresh_status touches several widgets, not just text fields, so the
+        whole method is marshalled rather than each write inside it.
+        """
+        self.refresh_status()
+
+    def refresh_status(self) -> None:
+        """Recompute the labels that read state from outside this window.
+
+        Called on open and after a download, so the window never shows a
+        reading taken earlier in the session.
+
+        Not everything on the panes is recomputed, and which is which matters.
+        The capture-backend label derives from sys.platform, the macOS version
+        and whether the helper binary exists, none of which change while the
+        process runs, so _build writes it once and it is correct forever. The
+        three below genuinely move underneath us: models get downloaded,
+        aggregate devices get created and deleted in Audio MIDI Setup, and
+        voices are added to the library by every transcription. Each was
+        written only during _build, so opening Preferences a second time
+        reported the state as it was the first time.
+
+        The body is guarded because this runs from the gear button's action
+        callback, and _model_status walks the Hugging Face cache while
+        _device_exists queries Core Audio. An OSError from either would escape
+        into AppKit's dispatch and abort the process without a traceback,
+        which is a worse outcome than a stale label.
+        """
+        # A running download owns the dependency label and publishes its own
+        # progress, so it is skipped entirely: overwriting it would report
+        # "Missing" over a live download and invite a second one. Skipped on
+        # the failure path too, which a single shared handler got wrong by
+        # putting an unrelated widget's error onto this label.
+        if not self._downloading:
+            self._recompute(
+                self._deps_status, _model_status, "Model status unavailable"
+            )
+
+        self._recompute(
+            self._aggregate_status,
+            lambda: _device_exists("Meeting Capture"),
+            "Device status unavailable",
+        )
+        self._recompute(
+            self._multiout_status,
+            lambda: _device_exists("Meeting Monitor"),
+            "Device status unavailable",
+        )
+        self._recompute_speakers()
+
+    @objc.python_method
+    def _recompute(self, label, produce, on_failure: str) -> None:
+        """Write one label, and let a failure cost only that label.
+
+        One try around the whole refresh meant the first failure abandoned
+        every recompute after it. Since _build no longer paints these, an
+        abandoned label renders empty rather than stale, on that open and on
+        every open after, because the same exception recurs.
+        """
+        try:
+            _set_label(label, produce())
+        except Exception as e:
+            print(
+                f"[overheard] could not refresh a Preferences label: {e}",
+                file=sys.stderr,
+            )
+            try:
+                _set_label(label, on_failure)
+            except Exception:
+                pass
+
+    def _recompute_speakers(self) -> None:
+        """The speaker popup is several widgets, so it gets its own guard."""
+        try:
+            self._refresh_speakers()
+        except Exception as e:
+            print(
+                f"[overheard] could not reload the known voices: {e}",
+                file=sys.stderr,
+            )
+
+    @objc_safe
+    def toggleLivePreview_(self, sender):
+        cfg.set_value("live_preview", bool(sender.state()))
+
+    # ---- Speakers ----------------------------------------------------------
+
+    @objc_safe
+    def toggleSpeakerMemory_(self, sender):
+        cfg.set_value("speaker_memory", bool(sender.state()))
+
+    def _refresh_speakers(self):
+        """Reload the known-voices popup from the library on disk."""
+        from overheard.speakers import SpeakerLibrary
+
+        known = SpeakerLibrary().describe()
+        self._speakers_popup.removeAllItems()
+        if known:
+            self._speakers_popup.addItemsWithTitles_(
+                [f"{name}  ({samples} recording{'s' if samples != 1 else ''})"
+                 for name, samples, _ in known]
+            )
+            self._known_speaker_names = [name for name, _, _ in known]
+        else:
+            self._speakers_popup.addItemWithTitle_("No voices remembered yet")
+            self._known_speaker_names = []
+        self._speakers_popup.setEnabled_(bool(known))
+        self._forget_btn.setEnabled_(bool(known))
+
+    @objc_safe
+    def forgetSpeaker_(self, sender):
+        from overheard.speakers import SpeakerLibrary
+
+        index = self._speakers_popup.indexOfSelectedItem()
+        names = getattr(self, "_known_speaker_names", [])
+        if not (0 <= index < len(names)):
             return
-        _write_hf_token_to_zshrc(token)
-        cfg.set_value("hf_token", token)
-        os.environ["HF_TOKEN"] = token
-        self._token_status.setStringValue_("✓ Saved")
+        SpeakerLibrary().forget(names[index])
+        self._refresh_speakers()
 
     # ---- Dependencies ------------------------------------------------------
 
+    @objc_safe
     def downloadModels_(self, sender):
-        self._deps_status.setStringValue_("Downloading... (this may take several minutes)")
-        threading.Thread(target=self._do_download_models, daemon=True).start()
+        """Start a download, unless one is already running.
 
-    def _do_download_models(self):
+        Without the latch every click spawned another daemon thread, so a user
+        who clicked twice ran two 30 minute subprocesses writing into the same
+        Hugging Face cache. Clicking twice is the natural response to a button
+        that appears to have done nothing, which is exactly what a multi
+        gigabyte download looks like for its first minute.
+        """
+        if self._downloading:
+            return
+        self._downloading = True
+        self._download_generation += 1
+        self._deps_status.setStringValue_("Downloading... (this may take several minutes)")
+        generation = self._download_generation
+        threading.Thread(
+            target=self._do_download_models, args=(generation,), daemon=True
+        ).start()
+
+    @objc_safe
+    def releaseDownload_(self, generation):
+        """Clear the latch, but only if this download still owns it.
+
+        Runs on the main thread, after the label has been written, so the latch
+        never clears while the pane still reads "Downloading...". Clearing it
+        on the worker before queuing the refresh left a window in which the
+        button was live and the label still said a download was running, which
+        is exactly when a user clicks again.
+
+        The generation check stops a finishing worker from releasing a latch
+        that a later download has since taken.
+        """
+        if generation == self._download_generation:
+            self._downloading = False
+
+    @objc.python_method
+    def _queue_refresh(self) -> None:
+        """Ask the main thread to re-read everything, from a worker.
+
+        No isMainThread() short-circuit. This is only ever reached from the
+        worker downloadModels_ starts, so that branch was dead in the app and
+        alive only for one test that called _do_download_models on the main
+        thread. Keeping it meant the download failure path was verified on a
+        branch production never takes, which is the defect class this unit
+        spent seven rounds on.
+        """
+        _perform_on_main(self, "refreshStatusOnMain:", None)
+
+    @objc.python_method
+    def _finish_download(self, generation) -> None:
+        """Release the latch on the main thread, ordered after the label.
+
+        No isMainThread() short-circuit, for the reason given on _queue_refresh:
+        production reaches this only from the download worker.
+        """
+        _perform_on_main(self, "releaseDownload:", generation)
+
+    @objc.python_method
+    def _do_download_models(self, generation=None):
+        if generation is None:
+            generation = self._download_generation
+        succeeded = False
         try:
-            self._deps_status.setStringValue_("Downloading whisper large-v3...")
+            _set_label(self._deps_status, "Downloading Parakeet TDT v3...")
+            from overheard.asr import PARAKEET_MODEL
+            code = ("from parakeet_mlx import from_pretrained; "
+                    f"from_pretrained({PARAKEET_MODEL!r})")
+            label = "Parakeet"
+
             result = subprocess.run(
-                ["python3", "-c",
-                 "import whisperx; whisperx.load_model('large-v3', 'cpu', compute_type='int8')"],
-                capture_output=True, text=True, timeout=600,
+                ["python3", "-c", code],
+                capture_output=True, text=True, timeout=1800,
             )
             if result.returncode != 0:
-                self._deps_status.setStringValue_(
-                    f"✗ Whisper failed: {result.stderr[:120]}"
+                _set_label(
+                    self._deps_status, f"✗ {label} failed: {result.stderr[:120]}"
                 )
                 return
 
-            hf_token = os.environ.get("HF_TOKEN", "")
-            if hf_token:
-                self._deps_status.setStringValue_("Downloading pyannote diarization model...")
+            # Warm the diarization models too. The helper fetches them on first
+            # use with no credentials, so this only saves the wait later.
+            from overheard.helper import helper_path
+            binary = helper_path()
+            if binary is not None:
+                _set_label(self._deps_status, "Downloading speaker models...")
                 result = subprocess.run(
-                    ["python3", "-c",
-                     "from pyannote.audio import Pipeline; "
-                     f"Pipeline.from_pretrained('pyannote/speaker-diarization-3.1',"
-                     f" use_auth_token='{hf_token}')"],
-                    capture_output=True, text=True, timeout=600,
+                    [str(binary), "download"],
+                    capture_output=True, text=True, timeout=1800,
                 )
                 if result.returncode != 0:
-                    self._deps_status.setStringValue_(
-                        f"✓ Whisper done  ✗ Pyannote failed: {result.stderr[:80]}"
+                    _set_label(
+                        self._deps_status,
+                        f"✓ {label} done  ✗ Speaker models: {result.stderr[:80]}",
                     )
                     return
 
-            self._deps_status.setStringValue_("✓ All models downloaded")
+            succeeded = True
         except subprocess.TimeoutExpired:
-            self._deps_status.setStringValue_("✗ Download timed out")
+            _set_label(self._deps_status, "✗ Download timed out")
         except Exception as e:
-            self._deps_status.setStringValue_(f"✗ {e}")
+            _set_label(self._deps_status, f"✗ {e}")
+        finally:
+            # The single release point, for every path through this method. An
+            # earlier version released on the success path and again here,
+            # because a return inside a try still runs its finally.
+            #
+            # It has to happen BEFORE the refresh, not after. refresh_status
+            # skips the dependency label while the latch is set, so releasing
+            # afterwards left the pane reading "Downloading..." forever with a
+            # live button underneath, which is the double click the latch is
+            # there to prevent. Releasing first also means the button is only
+            # live once the label says what actually happened.
+            self._finish_download(generation)
+            if succeeded:
+                self._queue_refresh()
 
     # ---- Output Folder -----------------------------------------------------
 
+    @objc_safe
     def toggleKeepRecordings_(self, sender):
         cfg.set_value("keep_recordings", bool(sender.state()))
 
+    @objc_safe
     def browseOutputFolder_(self, sender):
         panel = NSOpenPanel.openPanel()
         panel.setCanChooseFiles_(False)
@@ -218,8 +464,9 @@ class _PreferencesDelegate(NSObject):
             cfg.set_value("output_dir", path)
             self._output_status.setStringValue_("✓ Saved")
 
-    # ---- Integrations — Obsidian -------------------------------------------
+    # ---- Integrations, Obsidian -------------------------------------------
 
+    @objc_safe
     def toggleObsidian_(self, sender):
         enabled = bool(sender.state())
         cfg.set_value("obsidian_enabled", enabled)
@@ -227,6 +474,7 @@ class _PreferencesDelegate(NSObject):
         self._obsidian_inbox_field.setEnabled_(enabled)
         self._obsidian_browse_btn.setEnabled_(enabled)
 
+    @objc_safe
     def browseObsidianVault_(self, sender):
         panel = NSOpenPanel.openPanel()
         panel.setCanChooseFiles_(False)
@@ -244,16 +492,19 @@ class _PreferencesDelegate(NSObject):
             self._obsidian_vault_field.setStringValue_(path)
             cfg.set_value("obsidian_vault", path)
 
+    @objc_safe
     def saveObsidianInbox_(self, sender):
         val = self._obsidian_inbox_field.stringValue().strip()
         cfg.set_value("obsidian_inbox", val or "01_Inbox")
 
+    @objc_safe
     def saveLocalSpeakerName_(self, sender):
         val = self._local_speaker_field.stringValue().strip()
         cfg.set_value("local_speaker_name", val or "Don")
 
-    # ---- Integrations — Calendar -------------------------------------------
+    # ---- Integrations, Calendar -------------------------------------------
 
+    @objc_safe
     def connectCalendar_(self, sender):
         """Trigger the macOS Calendar TCC permission prompt deliberately."""
         self._calendar_status.setStringValue_("Requesting access…")
@@ -268,41 +519,37 @@ class _PreferencesDelegate(NSObject):
                 capture_output=True, text=True, timeout=30,
             )
             if result.returncode == 0 and result.stdout.strip():
-                self._calendar_status.setStringValue_("✓ Calendar access granted")
+                _set_label(self._calendar_status, "✓ Calendar access granted")
             else:
                 err = (result.stderr or "Permission denied").strip()[:80]
-                self._calendar_status.setStringValue_(f"✗ {err}")
+                _set_label(self._calendar_status, f"✗ {err}")
         except subprocess.TimeoutExpired:
-            self._calendar_status.setStringValue_("✗ Timed out — check System Settings → Privacy → Calendars")
+            _set_label(self._calendar_status, "✗ Timed out. Check System Settings → Privacy → Calendars")
         except Exception as e:
-            self._calendar_status.setStringValue_(f"✗ {e}")
+            _set_label(self._calendar_status, f"✗ {e}")
 
 
-# ---------------------------------------------------------------------------
-# HF Token helpers
-# ---------------------------------------------------------------------------
+def _model_status() -> str:
+    """Describe what is actually on disk, rather than assuming nothing is.
 
-def _write_hf_token_to_zshrc(token: str) -> None:
-    """Write or update the HF_TOKEN export line in ~/.zshrc."""
-    zshrc = Path.home() / ".zshrc"
-    export_line = f'export HF_TOKEN="{token}"'
-    lines = []
-    replaced = False
+    This label used to read "Downloads on first use" unconditionally, which was
+    indistinguishable from a real check and wrong for anyone who had already
+    downloaded.
+    """
+    from overheard.asr import PARAKEET_MODEL, is_model_cached
+    from overheard.helper import diarization_models_present
 
-    if zshrc.exists():
-        with open(zshrc) as f:
-            lines = f.readlines()
-        for i, line in enumerate(lines):
-            if line.strip().startswith("export HF_TOKEN="):
-                lines[i] = export_line + "\n"
-                replaced = True
-                break
+    have_asr = is_model_cached(PARAKEET_MODEL)
+    have_diar = diarization_models_present()
 
-    if not replaced:
-        lines.append(export_line + "\n")
-
-    with open(zshrc, "w") as f:
-        f.writelines(lines)
+    if have_asr and have_diar:
+        return "\u2713 Installed"
+    missing = []
+    if not have_asr:
+        missing.append("transcription")
+    if not have_diar:
+        missing.append("speaker")
+    return "Missing: " + " and ".join(missing) + " models"
 
 
 def _device_exists(name: str) -> str:
@@ -328,12 +575,41 @@ class PreferencesWindow:
     """
 
     def __init__(self):
-        self._window = None
-        self._delegate = None
+        self._window: Any = None
+        self._delegate: "_PreferencesDelegate | None" = None
+        # Set as the very last statement of _build, so it means "_build ran to
+        # completion" and nothing weaker. Keying on _window or on _delegate
+        # instead means keying on a value assigned in the first few lines of a
+        # method that then runs for another hundred and forty: a failure past
+        # that point leaves the panel believing it is built, forever, and
+        # every later open dies on a widget the build never got to.
+        self._built = False
+
+    def _ensure_built(self) -> "_PreferencesDelegate":
+        """Build on first use and hand back the delegate show() needs.
+
+        Retries on every call until a build finishes, because a partially
+        built panel is not a panel. Raising here rather than returning a
+        half-populated delegate keeps the AttributeError-inside-AppKit failure
+        off the table; the caller at the ObjC boundary is what turns this into
+        a message instead of an abort.
+        """
+        if not self._built:
+            self._build()
+        delegate = self._delegate
+        if not self._built or delegate is None:
+            raise RuntimeError("the preferences window failed to build")
+        return delegate
 
     def show(self) -> None:
-        if self._window is None:
-            self._build()
+        """Open the window, refreshing anything that can go stale while closed.
+
+        The window is built once and reused, so status computed during _build
+        would be a reading from the first time Preferences was ever opened.
+        Models get downloaded long after that.
+        """
+        delegate = self._ensure_built()
+        delegate.refresh_status()
         self._window.makeKeyAndOrderFront_(None)
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
 
@@ -363,13 +639,12 @@ class PreferencesWindow:
 
         # Inner pane dimensions (inside the tab chrome)
         PW = WIN_W - 40   # pane width available for content
-        BOTTOM = 20       # y baseline inside each pane
 
         # ================================================================== #
-        # Tab 1 — General
+        # Tab 1: General
         # ================================================================== #
         pane = _make_tab("General")
-        y = 240
+        y = 340
 
         pane.addSubview_(_make_label("Transcripts", 20, y, 300, 22, bold=True))
         y -= 36
@@ -388,19 +663,31 @@ class PreferencesWindow:
         pane.addSubview_(quit_btn)
 
         # ================================================================== #
-        # Tab 2 — Audio
+        # Tab 2: Audio
         # ================================================================== #
         pane = _make_tab("Audio")
-        y = 240
+        y = 340
 
         pane.addSubview_(_make_label("Recording Devices", 20, y, 300, 22, bold=True))
-        y -= 36
+        y -= 26
+
+        from overheard.capture import is_available as _tap_available
+        _tap_ok, _tap_why = _tap_available()
+        self._delegate._capture_status = _make_label(
+            "Capturing through Core Audio process taps. No extra devices needed."
+            if _tap_ok else
+            f"Process taps unavailable ({_tap_why}). The fallback below needs BlackHole.",
+            20, y, PW, 16,
+        )
+        pane.addSubview_(self._delegate._capture_status)
+        y -= 30
 
         btn_agg = _make_button("Create Recording Device", 20, y, 210, 28,
                                "createRecordingDevice:", self._delegate)
         pane.addSubview_(btn_agg)
+        # Left empty: refresh_status is the single writer, and show() calls
+        # it immediately after this, so nothing is ever painted blank.
         self._delegate._aggregate_status = _make_status(238, y + 5, PW - 220)
-        self._delegate._aggregate_status.setStringValue_(_device_exists("Meeting Capture"))
         pane.addSubview_(self._delegate._aggregate_status)
         y -= 36
 
@@ -408,48 +695,67 @@ class PreferencesWindow:
                               "createMonitoringDevice:", self._delegate)
         pane.addSubview_(btn_mo)
         self._delegate._multiout_status = _make_status(238, y + 5, PW - 220)
-        self._delegate._multiout_status.setStringValue_(_device_exists("Meeting Monitor"))
         pane.addSubview_(self._delegate._multiout_status)
         y -= 50
 
         pane.addSubview_(_make_label(
-            "Creates CoreAudio aggregate devices combining BlackHole 2ch\n"
-            "and your MacBook microphone/speakers for meeting capture.",
-            20, y, PW, 32,
+            "Legacy fallback, for Macs where process taps are unavailable.\n"
+            "Builds CoreAudio aggregates from BlackHole 2ch and your built-in\n"
+            "microphone and speakers. Not needed when taps are working.",
+            20, y, PW, 46,
         ))
 
         # ================================================================== #
-        # Tab 2 — Transcription
+        # Tab 3: Transcription
         # ================================================================== #
         pane = _make_tab("Transcription")
-        y = 240
+        y = 340
+        from AppKit import NSPopUpButton, NSButton as _NSBtn
 
-        pane.addSubview_(_make_label("Hugging Face Token", 20, y, 300, 22, bold=True))
-        y -= 10
-        pane.addSubview_(_make_label(
-            "Required for speaker diarization (pyannote). Get one at huggingface.co.",
-            20, y, PW, 18,
-        ))
-        y -= 34
+        pane.addSubview_(_make_label("Engine", 20, y, 300, 22, bold=True))
+        y -= 32
 
-        self._delegate._token_field = _make_text_field(
-            20, y, PW - 90, 24,
-            placeholder="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-            secure=True,
-        )
-        if os.environ.get("HF_TOKEN"):
-            self._delegate._token_field.setStringValue_(os.environ["HF_TOKEN"])
-        pane.addSubview_(self._delegate._token_field)
-        pane.addSubview_(_make_button("Save", PW - 64, y, 80, 24,
-                                     "saveToken:", self._delegate))
+        self._delegate._engine_status = _make_status(20, y, PW)
+        self._delegate._engine_status.setStringValue_(_ENGINE_BLURB)
+        pane.addSubview_(self._delegate._engine_status)
         y -= 28
 
-        self._delegate._token_status = _make_status(20, y, PW)
-        self._delegate._token_status.setStringValue_(
-            "✓ Token is currently set" if os.environ.get("HF_TOKEN") else "No token set"
+        live_check = _NSBtn.alloc().initWithFrame_(NSMakeRect(20, y, PW, 20))
+        live_check.setButtonType_(3)   # NSButtonTypeSwitch
+        live_check.setTitle_("Show live transcript while recording")
+        live_check.setState_(1 if cfg.get("live_preview") else 0)
+        live_check.setTarget_(self._delegate)
+        live_check.setAction_("toggleLivePreview:")
+        pane.addSubview_(live_check)
+        y -= 42
+
+        pane.addSubview_(_make_label("Speakers", 20, y, 300, 22, bold=True))
+        y -= 24
+        pane.addSubview_(_make_label(
+            "Runs on the Neural Engine. No account or token needed.",
+            20, y, PW, 18,
+        ))
+        y -= 26
+
+        remember_check = _NSBtn.alloc().initWithFrame_(NSMakeRect(20, y, PW, 20))
+        remember_check.setButtonType_(3)
+        remember_check.setTitle_("Recognise returning speakers by voice")
+        remember_check.setState_(1 if cfg.get("speaker_memory") else 0)
+        remember_check.setTarget_(self._delegate)
+        remember_check.setAction_("toggleSpeakerMemory:")
+        pane.addSubview_(remember_check)
+        y -= 30
+
+        speakers_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(20, y, PW - 110, 26), False
         )
-        pane.addSubview_(self._delegate._token_status)
-        y -= 50
+        pane.addSubview_(speakers_popup)
+        self._delegate._speakers_popup = speakers_popup
+        forget_btn = _make_button("Forget", PW - 84, y + 1, 100, 24,
+                                  "forgetSpeaker:", self._delegate)
+        pane.addSubview_(forget_btn)
+        self._delegate._forget_btn = forget_btn
+        y -= 38
 
         pane.addSubview_(_make_label("AI Models", 20, y, 300, 22, bold=True))
         y -= 36
@@ -457,20 +763,19 @@ class PreferencesWindow:
         pane.addSubview_(_make_button("Download Models", 20, y, 160, 28,
                                      "downloadModels:", self._delegate))
         self._delegate._deps_status = _make_status(190, y + 5, PW - 170)
-        self._delegate._deps_status.setStringValue_("Whisper large-v3 + pyannote")
         pane.addSubview_(self._delegate._deps_status)
 
         # ================================================================== #
-        # Tab 3 — Output
+        # Tab 4: Output
         # ================================================================== #
         pane = _make_tab("Output")
-        y = 240
+        y = 340
         from AppKit import NSButton as _NSButton
 
         pane.addSubview_(_make_label("Transcript Folder", 20, y, 300, 22, bold=True))
         y -= 36
 
-        current_output = cfg.get("output_dir", str(Path.home() / "overheard" / "transcripts"))
+        current_output = cfg.get("output_dir")
         self._delegate._output_field = _make_text_field(
             20, y, PW - 100, 24, placeholder="~/overheard/transcripts/",
         )
@@ -487,18 +792,18 @@ class PreferencesWindow:
         keep_btn = _NSButton.alloc().initWithFrame_(NSMakeRect(20, y, PW, 20))
         keep_btn.setButtonType_(3)
         keep_btn.setTitle_("Keep audio recordings after transcription")
-        keep_btn.setState_(1 if cfg.get("keep_recordings", False) else 0)
+        keep_btn.setState_(1 if cfg.get("keep_recordings") else 0)
         keep_btn.setTarget_(self._delegate)
         keep_btn.setAction_("toggleKeepRecordings:")
         pane.addSubview_(keep_btn)
         self._delegate._keep_recordings_btn = keep_btn
 
         # ================================================================== #
-        # Tab 4 — Integrations
+        # Tab 5: Integrations
         # ================================================================== #
         pane = _make_tab("Integrations")
-        y = 240
-        obsidian_enabled = bool(cfg.get("obsidian_enabled", False))
+        y = 340
+        obsidian_enabled = cfg.get("obsidian_enabled")
 
         pane.addSubview_(_make_label("Obsidian", 20, y, 300, 22, bold=True))
         y -= 30
@@ -516,7 +821,7 @@ class PreferencesWindow:
         pane.addSubview_(_make_label("Vault:", 20, y, 60, 20))
         obs_vault_field = _make_text_field(84, y, PW - 160, 24,
                                            placeholder="/Users/you/Documents/MyVault")
-        obs_vault_field.setStringValue_(cfg.get("obsidian_vault", ""))
+        obs_vault_field.setStringValue_(cfg.get("obsidian_vault"))
         obs_vault_field.setEnabled_(obsidian_enabled)
         pane.addSubview_(obs_vault_field)
         self._delegate._obsidian_vault_field = obs_vault_field
@@ -529,7 +834,7 @@ class PreferencesWindow:
 
         pane.addSubview_(_make_label("Inbox:", 20, y, 60, 20))
         obs_inbox_field = _make_text_field(84, y, 180, 24, placeholder="01_Inbox")
-        obs_inbox_field.setStringValue_(cfg.get("obsidian_inbox", "01_Inbox"))
+        obs_inbox_field.setStringValue_(cfg.get("obsidian_inbox"))
         obs_inbox_field.setEnabled_(obsidian_enabled)
         obs_inbox_field.setTarget_(self._delegate)
         obs_inbox_field.setAction_("saveObsidianInbox:")
@@ -551,9 +856,13 @@ class PreferencesWindow:
 
         pane.addSubview_(_make_label("Speaker name:", 20, y, 110, 20))
         local_speaker_field = _make_text_field(134, y, 160, 24, placeholder="Don")
-        local_speaker_field.setStringValue_(cfg.get("local_speaker_name", "Don"))
+        local_speaker_field.setStringValue_(cfg.get("local_speaker_name"))
         local_speaker_field.setTarget_(self._delegate)
         local_speaker_field.setAction_("saveLocalSpeakerName:")
         pane.addSubview_(local_speaker_field)
         self._delegate._local_speaker_field = local_speaker_field
         pane.addSubview_(_make_label("(mic attribution)", 300, y, 130, 20))
+
+        # Last statement in the method, deliberately. Anything above can fail,
+        # and until this runs the panel is not built.
+        self._built = True
