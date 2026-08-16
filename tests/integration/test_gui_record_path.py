@@ -65,13 +65,22 @@ def _drive(work, env=None):
     results_path = work / "results.json"
     config_dir = work / "config"
     config_dir.mkdir(exist_ok=True)
+    tmpdir = work / "tmp"
+    tmpdir.mkdir(exist_ok=True)
 
     completed = subprocess.run(
         [sys.executable, str(DRIVER), str(results_path), SRC, str(config_dir)],
         capture_output=True,
         text=True,
         timeout=TIMEOUT,
-        env={**os.environ, **(env or {})},
+        # TMPDIR, because _on_stop writes the recording to a
+        # NamedTemporaryFile(delete=False) that only _on_details_confirmed or
+        # _on_discard removes, and this run reaches neither. Pointing the whole
+        # child at tmp_path means the leak is reaped with the test rather than
+        # accumulating in /var/folders: there were 2868 orphans totalling 830 MB
+        # on the development machine when this was found, most of them from
+        # ordinary app use rather than from here.
+        env={**os.environ, "TMPDIR": str(tmpdir), **(env or {})},
     )
 
     raw = results_path.read_text() if results_path.exists() else ""
@@ -160,6 +169,28 @@ class TestTheAppSurvivesPressingRecord:
             "built", "pressed record", "observed", "stopped", "quit"
         ], f"the driver did not complete its script: {results.get('reached')}"
 
+    def test_the_ui_actually_appeared(self, run_result):
+        """Without this, most of the file passes on a run with no UI at all.
+
+        TransportPopover._show() returns silently when _status_btn is None, and
+        _build_popover swallows a failing hook_status_item with a print. Delete
+        that hook and the panel is never ordered front, so no drawRect_ ever
+        runs, no guard can fire, and every other assertion here stays green
+        while a real user sees no window whatsoever.
+
+        The guard assertion is described as carrying the weight of this file.
+        It only does so if the UI was on screen to be drawn.
+        """
+        _completed, results = run_result
+        assert results.get("status_item_hooked") is True, (
+            "the popover was never hooked to the status item, so _show() "
+            "returned silently and nothing was ever displayed"
+        )
+        assert results.get("panel_visible") is True, (
+            "the transport panel never became visible, so nothing drew and "
+            "the guard assertion below had nothing to catch"
+        )
+
     def test_the_record_button_is_wired_to_something(self, run_result):
         """The seam this whole file exists to cover, and the one it used to skip.
 
@@ -219,9 +250,16 @@ class TestTheAppSurvivesPressingRecord:
         during a clean record cycle is a failure here.
 
         Matched on the guard's own message rather than a list of method names,
-        so a newly guarded method is covered the day it is added. This is the
-        assertion that catches the original _LevelBar crash: reintroducing it
-        leaves the exit code at 0 and fails here.
+        so a newly guarded method is covered the day it is added.
+
+        It does NOT catch the original _LevelBar crash on its own, and an
+        earlier version of this docstring claimed it did. _LevelBar carries
+        class-level _level and _active defaults, and drawRect_ reads only those
+        two, so reintroducing the initialiser bug alone leaves drawRect_ reading
+        the defaults: no AttributeError, no guard, nothing to see here.
+        tests/unit/test_view_initialisers.py says the same thing about its own
+        drawing tests. test_the_level_bars_ran_their_own_initialisers is what
+        fails on that mutation; this one needs the class defaults removed too.
         """
         completed, _results = run_result
         fired = [

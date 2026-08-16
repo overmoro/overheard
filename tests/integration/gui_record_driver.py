@@ -31,6 +31,9 @@ results = {
     "reached": [],
     "level_bars": {},
     "sys_row_hidden_at_idle": None,
+    "panel_visible": None,
+    "status_item_hooked": None,
+    "state_transitions": [],
     "record_button_enabled": None,
     "record_button_has_callback": None,
     "state_after_record": None,
@@ -118,6 +121,31 @@ class Driver:
         self.started = None
         self.done = set()
         self.pressed_at = None
+        self.states = []
+        self._latch_state_changes()
+
+    def _latch_state_changes(self):
+        """Record every state transition, because production consumes the error.
+
+        _poll_recorder_started reads _pending_recorder_error and immediately
+        nulls it (app.py:186-187) on a 0.15s timer, while this driver polls on
+        a 0.25s one. Both are NSTimers on the same run loop, so the faster one
+        usually wins and the error is gone before it can be read: a machine
+        whose tap start genuinely fails would spin for the full RECORDER_WAIT
+        and report "still pending" with no error, and the environment skip
+        built on that field would never fire.
+
+        A failed start still transitions to IDLE with the reason as its status
+        text, and nothing clears that, so it is latched here instead.
+        """
+        app = self.app
+        original = app._set_state
+
+        def recording_set_state(new_state, status=""):
+            self.states.append({"state": new_state, "status": status})
+            return original(new_state, status)
+
+        app._set_state = recording_set_state
 
     def __call__(self, timer):
         import rumps
@@ -133,13 +161,32 @@ class Driver:
             self._quit(rumps)
 
     def _quit(self, rumps):
-        # Leave nothing running: an abandoned tap holds a Core Audio device and
-        # an abandoned live transcriber holds a second helper process.
-        try:
-            if self.app._recorder is not None:
-                self.app._recorder.stop()
-        except Exception:
-            pass
+        # Leave nothing running and nothing behind. An abandoned tap holds a
+        # Core Audio device; an abandoned helper holds a second process; and
+        # _on_stop writes the recording to a NamedTemporaryFile(delete=False)
+        # that only _on_details_confirmed or _on_discard removes, neither of
+        # which this run reaches.
+        #
+        # _pending_recorder as well as _recorder: on the RECORDER_WAIT path the
+        # start is still in flight, so _recorder is None while a helper
+        # subprocess is already spawned and blocked on the permission dialog,
+        # where it will never take EPIPE from a dead parent.
+        app = self.app
+        for attr in ("_recorder", "_pending_recorder"):
+            recorder = getattr(app, attr, None)
+            if recorder is not None:
+                try:
+                    recorder.stop()
+                except Exception:
+                    pass
+
+        pending_wav = getattr(app, "_pending_wav", None)
+        if pending_wav:
+            try:
+                os.unlink(pending_wav)
+            except OSError:
+                pass
+
         _write()
         rumps.quit_application()
 
@@ -171,6 +218,13 @@ class Driver:
             app._set_state(state.IDLE, "Ready")
             app._popover._show()
             results["sys_row_hidden_at_idle"] = bool(app._popover._sys_row.isHidden())
+            # _show() returns silently when _status_btn is None, and
+            # _build_popover swallows a failing hook_status_item with a print.
+            # Without these, a run where no UI ever appeared draws nothing, so
+            # no guard can fire and every assertion here passes while a real
+            # user sees an app with no window at all.
+            results["panel_visible"] = bool(app._popover._panel.isVisible())
+            results["status_item_hooked"] = app._popover._status_btn is not None
             button = app._popover._btn_record
             results["record_button_enabled"] = bool(button._enabled)
             results["record_button_has_callback"] = button._callback is not None
@@ -193,7 +247,14 @@ class Driver:
         elif "record" in self.done and "observe" not in self.done:
             waited = now - self.pressed_at
             started = app._recorder is not None
-            failed = app._pending_recorder_error is not None
+            # A failed start goes back to IDLE with the reason as its status.
+            # Read from the latch rather than from _pending_recorder_error,
+            # which production clears on a faster timer than this one.
+            back_to_idle = [
+                entry for entry in self.states[1:]
+                if entry["state"] == state.IDLE
+            ]
+            failed = bool(back_to_idle) and not started
             if not (started or failed or waited >= self.RECORDER_WAIT):
                 return
 
@@ -201,7 +262,10 @@ class Driver:
             results["terminal_state"] = (
                 "started" if started else "failed" if failed else "still pending"
             )
-            results["recorder_start_error"] = app._pending_recorder_error
+            results["recorder_start_error"] = (
+                back_to_idle[-1]["status"] if back_to_idle else None
+            )
+            results["state_transitions"] = self.states
             results["state_after_record"] = app._state
             recorder = app._recorder
             results["recorder_class"] = type(recorder).__name__ if recorder else None
