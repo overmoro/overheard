@@ -122,6 +122,32 @@ def test_an_abort_still_reports_how_far_the_run_got(tmp_path):
     )
 
 
+@requires_capture
+def test_a_crash_leaves_its_recording_inside_the_test_directory(tmp_path):
+    """The containment layer, which the happy path cannot show.
+
+    On a clean run the driver unlinks the recording itself, so removing the
+    TMPDIR redirection changes nothing any assertion can see. Its value is on
+    the path where _quit never runs at all: a crash after _on_stop has written
+    the audio. Without the redirection that WAV lands in /var/folders and stays
+    there, which is how 2868 orphans totalling 830 MB accumulated.
+
+    So this aborts after Stop, when the recording exists and cleanup cannot
+    happen, and requires the wreckage to be inside the directory pytest will
+    reap rather than loose on the machine.
+    """
+    completed, _results, tmpdir = _drive(
+        tmp_path, env={"OVERHEARD_DRIVER_ABORT_AFTER": "stopped"}
+    )
+
+    assert completed.returncode != 0, "the driver was asked to abort and did not"
+    leaked = sorted(p.name for p in tmpdir.rglob("*.wav"))
+    assert leaked, (
+        "the recording did not land in the isolated temp directory, so it went "
+        "to the system one and will outlive this test"
+    )
+
+
 @pytest.fixture(scope="module")
 def run_result(tmp_path_factory):
     """Drive the app once and share the outcome.

@@ -344,6 +344,10 @@ class Driver:
             results["state_after_stop"] = app._state
             results["reached"].append("stopped")
             _write()
+            # Aborting HERE, after _on_stop has written the recording, is what
+            # makes the TMPDIR containment observable: _quit never runs, so the
+            # unlink never happens, and the leaked WAV has to land somewhere.
+            self._maybe_abort("stopped")
 
         elif "stop" in self.done and "quit" not in self.done:
             self.done.add("quit")
