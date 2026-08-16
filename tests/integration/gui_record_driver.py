@@ -32,7 +32,7 @@ results = {
     "level_bars": {},
     "sys_row_hidden_at_idle": None,
     "panel_visible": None,
-    "status_item_hooked": None,
+    "status_item_target_answers": None,
     "state_transitions": [],
     "record_button_enabled": None,
     "record_button_has_callback": None,
@@ -122,6 +122,8 @@ class Driver:
         self.done = set()
         self.pressed_at = None
         self.states = []
+        self.in_flight = None
+        self.start_error = None
         self._latch_state_changes()
 
     def _latch_state_changes(self):
@@ -146,6 +148,36 @@ class Driver:
             return original(new_state, status)
 
         app._set_state = recording_set_state
+
+        # Latch the recorder as soon as it exists, not when the app publishes
+        # it. _start_recorder_bg assigns app._pending_recorder only AFTER
+        # start() returns (app.py:168-171), so during a start that blocks on
+        # the permission dialog, which is exactly the case RECORDER_WAIT exists
+        # for, both _recorder and _pending_recorder are None and there is
+        # nothing for _quit to stop. Wrapping the factory makes the object
+        # reachable while start() is still blocking.
+        original_make = app._make_recorder
+
+        def latching_make_recorder():
+            recorder = original_make()
+            self.in_flight = recorder
+            return recorder
+
+        app._make_recorder = latching_make_recorder
+
+        # And the untruncated start error. _poll_recorder_started passes
+        # detail[:60] to _set_state (app.py:192), and the helper's own
+        # permission message puts the word "permission" past character 60, so
+        # matching the status label would miss the one machine state the
+        # environment skip exists for.
+        original_poll = app._poll_recorder_started
+
+        def latching_poll(timer):
+            if app._pending_recorder_error is not None:
+                self.start_error = app._pending_recorder_error
+            return original_poll(timer)
+
+        app._poll_recorder_started = latching_poll
 
     def __call__(self, timer):
         import rumps
@@ -172,14 +204,26 @@ class Driver:
         # subprocess is already spawned and blocked on the permission dialog,
         # where it will never take EPIPE from a dead parent.
         app = self.app
-        for attr in ("_recorder", "_pending_recorder"):
-            recorder = getattr(app, attr, None)
+        for recorder in (
+            getattr(app, "_recorder", None),
+            getattr(app, "_pending_recorder", None),
+            self.in_flight,
+        ):
             if recorder is not None:
                 try:
                     recorder.stop()
                 except Exception:
                     pass
 
+        # _pending_wav is assigned at the END of _gather (app.py:363), after
+        # sf.write, after a Calendar lookup that joins for up to 3 seconds and
+        # after detect_source(). The driver quits on the next 0.25s tick after
+        # Stop, so on a machine where any of that is slower the attribute is
+        # still None here and an unconditional unlink is a no-op that leaves the
+        # WAV behind. Wait briefly for it rather than racing it.
+        deadline = time.monotonic() + 10.0
+        while getattr(app, "_pending_wav", None) is None and time.monotonic() < deadline:
+            time.sleep(0.05)
         pending_wav = getattr(app, "_pending_wav", None)
         if pending_wav:
             try:
@@ -216,15 +260,28 @@ class Driver:
             # Before _set_state, which writes to both bars through its setters.
             results["level_bars"] = _level_bar_state(app)
             app._set_state(state.IDLE, "Ready")
-            app._popover._show()
             results["sys_row_hidden_at_idle"] = bool(app._popover._sys_row.isHidden())
-            # _show() returns silently when _status_btn is None, and
-            # _build_popover swallows a failing hook_status_item with a print.
-            # Without these, a run where no UI ever appeared draws nothing, so
-            # no guard can fire and every assertion here passes while a real
-            # user sees an app with no window at all.
+
+            # Open the panel the way a user does: click the menu-bar icon.
+            #
+            # An earlier version called app._popover._show() directly and then
+            # asserted the panel was visible. Production never calls _show():
+            # main() only builds the popover and sets IDLE, and the icon is the
+            # ONLY way to open the transport. So misspelling the action selector
+            # in hook_status_item left the app unusable, a real user clicking the
+            # icon getting nothing, and all ten tests green. Driving the button's
+            # own target/action covers hook_status_item's wiring, the delegate's
+            # togglePanel_, and toggle()/_show() as one path.
+            button = app._popover._status_btn
+            results["status_item_target_answers"] = bool(
+                button is not None
+                and button.target() is not None
+                and button.action()
+                and button.target().respondsToSelector_(button.action())
+            )
+            if results["status_item_target_answers"]:
+                button.target().performSelector_withObject_(button.action(), button)
             results["panel_visible"] = bool(app._popover._panel.isVisible())
-            results["status_item_hooked"] = app._popover._status_btn is not None
             button = app._popover._btn_record
             results["record_button_enabled"] = bool(button._enabled)
             results["record_button_has_callback"] = button._callback is not None
@@ -262,7 +319,10 @@ class Driver:
             results["terminal_state"] = (
                 "started" if started else "failed" if failed else "still pending"
             )
-            results["recorder_start_error"] = (
+            # The untruncated error when it was latched, falling back to the
+            # status label. The label is truncated to 60 characters for display
+            # and is the wrong surface for an environment predicate.
+            results["recorder_start_error"] = self.start_error or (
                 back_to_idle[-1]["status"] if back_to_idle else None
             )
             results["state_transitions"] = self.states

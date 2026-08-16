@@ -90,7 +90,7 @@ def _drive(work, env=None):
         # Never mask a crash with a parse error. The driver writes atomically,
         # so this should not happen; if it does, the raw text is the evidence.
         results = {"error": f"results file was not valid JSON: {raw[:2000]!r}"}
-    return completed, results
+    return completed, results, tmpdir
 
 
 @requires_capture
@@ -108,7 +108,7 @@ def test_an_abort_still_reports_how_far_the_run_got(tmp_path):
     how far it got: a crash report of "stages reached: []" for a run that got
     two steps in is worse than useless when the next crash is a real one.
     """
-    completed, results = _drive(
+    completed, results, _tmpdir = _drive(
         tmp_path, env={"OVERHEARD_DRIVER_ABORT_AFTER": "pressed record"}
     )
 
@@ -130,14 +130,14 @@ def run_result(tmp_path_factory):
     costs six handshakes and about a minute. Module-scoped so each assertion
     still names its own failure.
     """
-    completed, results = _drive(tmp_path_factory.mktemp("gui"))
+    completed, results, tmpdir = _drive(tmp_path_factory.mktemp("gui"))
 
     if results.get("terminal_state") == "failed":
         detail = str(results.get("recorder_start_error") or "").lower()
         if any(needle in detail for needle in ENVIRONMENT_FAILURES):
             pytest.skip(f"this machine cannot start capture: {detail}")
 
-    return completed, results
+    return completed, results, tmpdir
 
 
 @requires_capture
@@ -153,7 +153,7 @@ class TestTheAppSurvivesPressingRecord:
         first-party methods, so survival is close to unconditional. The guard
         assertion below is what carries the weight.
         """
-        completed, results = run_result
+        completed, results, _tmpdir = run_result
         assert completed.returncode == 0, (
             f"the app died with returncode {completed.returncode}.\n"
             f"driver error: {results.get('error')}\n"
@@ -164,31 +164,54 @@ class TestTheAppSurvivesPressingRecord:
 
     def test_it_got_all_the_way_through(self, run_result):
         """Exit code 0 is also satisfied by doing nothing at all."""
-        _completed, results = run_result
+        _completed, results, _tmpdir = run_result
         assert results.get("reached") == [
             "built", "pressed record", "observed", "stopped", "quit"
         ], f"the driver did not complete its script: {results.get('reached')}"
 
-    def test_the_ui_actually_appeared(self, run_result):
-        """Without this, most of the file passes on a run with no UI at all.
+    def test_the_menu_bar_icon_opens_the_transport(self, run_result):
+        """The only way a user opens the panel, and it was never exercised.
 
-        TransportPopover._show() returns silently when _status_btn is None, and
-        _build_popover swallows a failing hook_status_item with a print. Delete
-        that hook and the panel is never ordered front, so no drawRect_ ever
-        runs, no guard can fire, and every other assertion here stays green
-        while a real user sees no window whatsoever.
+        An earlier version called _popover._show() directly and then asserted
+        the panel was visible. Production never calls _show(): main() builds the
+        popover and sets IDLE, and the menu-bar icon is the whole of the rest.
+        Misspelling the action selector in hook_status_item therefore left the
+        app unusable, a real click doing nothing, and all ten tests green.
 
-        The guard assertion is described as carrying the weight of this file.
-        It only does so if the UI was on screen to be drawn.
+        The driver now fires the button's own target and action, which covers
+        hook_status_item's wiring, the delegate's togglePanel_, and toggle() and
+        _show() beneath them, as one path. Reading _status_btn was no better: it
+        is assigned on hook_status_item's first line, before the wiring, so it
+        was True whenever the call was entered at all.
         """
-        _completed, results = run_result
-        assert results.get("status_item_hooked") is True, (
-            "the popover was never hooked to the status item, so _show() "
-            "returned silently and nothing was ever displayed"
+        _completed, results, _tmpdir = run_result
+        assert results.get("status_item_target_answers") is True, (
+            "the menu-bar icon is wired to a target that does not answer its "
+            "action, so clicking it does nothing and the transport cannot open"
         )
         assert results.get("panel_visible") is True, (
-            "the transport panel never became visible, so nothing drew and "
-            "the guard assertion below had nothing to catch"
+            "clicking the menu-bar icon did not open the transport panel, so "
+            "nothing drew and the guard assertion had nothing to catch"
+        )
+
+    def test_the_run_leaves_no_recording_behind(self, run_result):
+        """Otherwise the fix for the leak has nothing that fails without it.
+
+        Pressing the real Stop reaches _on_stop, which writes the audio to a
+        NamedTemporaryFile(delete=False) removed only by _on_details_confirmed
+        or _on_discard, and this run reaches neither. Without an assertion here,
+        deleting both the TMPDIR redirection and the driver's unlink left all
+        ten tests green while every run dropped a WAV: there were 2868 orphans
+        totalling 830 MB on the development machine when this was found.
+
+        Asserted on the whole isolated temp directory rather than on a glob for
+        WAVs, so anything else the run abandons is caught too.
+        """
+        _completed, _results, tmpdir = run_result
+        leftovers = sorted(p.name for p in tmpdir.iterdir())
+        assert not leftovers, (
+            f"the run left {len(leftovers)} file(s) in its temp directory: "
+            f"{leftovers[:10]}"
         )
 
     def test_the_record_button_is_wired_to_something(self, run_result):
@@ -200,7 +223,7 @@ class TestTheAppSurvivesPressingRecord:
         nothing whatsoever for a real user, and every assertion here stayed
         green.
         """
-        _completed, results = run_result
+        _completed, results, _tmpdir = run_result
         assert results.get("record_button_has_callback") is True, (
             "the Record button has no callback, so pressing it does nothing"
         )
@@ -214,7 +237,7 @@ class TestTheAppSurvivesPressingRecord:
         Reached by pressing the control, so it covers the wiring, the _enabled
         gate, the deferred start and the poll timer as one path.
         """
-        _completed, results = run_result
+        _completed, results, _tmpdir = run_result
         assert results.get("terminal_state") == "started", (
             f"capture never started: {results.get('terminal_state')}, "
             f"error {results.get('recorder_start_error')!r}"
@@ -236,7 +259,7 @@ class TestTheAppSurvivesPressingRecord:
 
     def test_pressing_stop_returns_the_app_to_idle(self, run_result):
         """The other half of the transport, also through the real control."""
-        _completed, results = run_result
+        _completed, results, _tmpdir = run_result
         assert results.get("state_after_stop") != "recording", (
             "the app was still recording after Stop was pressed"
         )
@@ -261,7 +284,7 @@ class TestTheAppSurvivesPressingRecord:
         drawing tests. test_the_level_bars_ran_their_own_initialisers is what
         fails on that mutation; this one needs the class defaults removed too.
         """
-        completed, _results = run_result
+        completed, _results, _tmpdir = run_result
         fired = [
             line for line in completed.stderr.splitlines()
             if line.startswith("[overheard]") and " failed: " in line
@@ -280,7 +303,7 @@ class TestTheAppSurvivesPressingRecord:
         from an uninitialised one. The instance dict can, and is read before
         _set_state, whose setters would otherwise populate it either way.
         """
-        _completed, results = run_result
+        _completed, results, _tmpdir = run_result
         bars = results.get("level_bars") or {}
         assert set(bars) == {"mic", "sys"}, f"expected both bars, got {bars}"
         for role, keys in bars.items():
@@ -297,7 +320,7 @@ class TestTheAppSurvivesPressingRecord:
         ordering the app never has at launch. Here the popover is built and set
         to IDLE exactly as main() does it.
         """
-        _completed, results = run_result
+        _completed, results, _tmpdir = run_result
         assert results.get("sys_row_hidden_at_idle") is True, (
             "an idle popover showed a live system-audio meter row"
         )
