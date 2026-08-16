@@ -18,6 +18,7 @@ tests/unit/ and are not restated here.
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -59,24 +60,18 @@ requires_capture = pytest.mark.skipif(
 )
 
 
-@pytest.fixture(scope="module")
-def run_result(tmp_path_factory):
-    """Drive the app once and share the outcome.
-
-    One run, several assertions, because starting Core Audio taps six times
-    costs six handshakes and about a minute. Module-scoped so each assertion
-    still names its own failure.
-    """
-    work = tmp_path_factory.mktemp("gui")
+def _drive(work, env=None):
+    """Run the driver once against an isolated config, returning (proc, results)."""
     results_path = work / "results.json"
     config_dir = work / "config"
-    config_dir.mkdir()
+    config_dir.mkdir(exist_ok=True)
 
     completed = subprocess.run(
         [sys.executable, str(DRIVER), str(results_path), SRC, str(config_dir)],
         capture_output=True,
         text=True,
         timeout=TIMEOUT,
+        env={**os.environ, **(env or {})},
     )
 
     raw = results_path.read_text() if results_path.exists() else ""
@@ -86,6 +81,47 @@ def run_result(tmp_path_factory):
         # Never mask a crash with a parse error. The driver writes atomically,
         # so this should not happen; if it does, the raw text is the evidence.
         results = {"error": f"results file was not valid JSON: {raw[:2000]!r}"}
+    return completed, results
+
+
+@requires_capture
+def test_an_abort_still_reports_how_far_the_run_got(tmp_path):
+    """The diagnostics this whole file leans on when everything else has failed.
+
+    Writing results after every step only pays off on an abort, so on a healthy
+    run the final write covers everything and deleting the intermediate ones
+    changes nothing any assertion can see. That is an untested safety net, and
+    shipping one of those is the mistake this unit exists to stop making.
+
+    So one run is told to abort deliberately, right after pressing Record.
+    os.abort() gives no unwinding and no flush, which is as close to the real
+    SIGTRAP as can be arranged on purpose. What must survive is the file saying
+    how far it got: a crash report of "stages reached: []" for a run that got
+    two steps in is worse than useless when the next crash is a real one.
+    """
+    completed, results = _drive(
+        tmp_path, env={"OVERHEARD_DRIVER_ABORT_AFTER": "pressed record"}
+    )
+
+    assert completed.returncode != 0, "the driver was asked to abort and did not"
+    assert results.get("reached") == ["built", "pressed record"], (
+        "the crash report lost the stages the run actually completed, which is "
+        f"the only diagnosis an abort leaves: {results.get('reached')}"
+    )
+    assert results.get("record_button_has_callback") is True, (
+        "observations recorded before the abort were lost with it"
+    )
+
+
+@pytest.fixture(scope="module")
+def run_result(tmp_path_factory):
+    """Drive the app once and share the outcome.
+
+    One run, several assertions, because starting Core Audio taps six times
+    costs six handshakes and about a minute. Module-scoped so each assertion
+    still names its own failure.
+    """
+    completed, results = _drive(tmp_path_factory.mktemp("gui"))
 
     if results.get("terminal_state") == "failed":
         detail = str(results.get("recorder_start_error") or "").lower()

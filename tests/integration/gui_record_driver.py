@@ -143,6 +143,19 @@ class Driver:
         _write()
         rumps.quit_application()
 
+    def _maybe_abort(self, step_name):
+        """Abort the way a real crash does, when asked to, for one test.
+
+        The per-step writes only pay off on an abort, so on any successful run
+        deleting them changes nothing observable and no mutation can catch
+        their loss. That is an untested safety net, which is the same shape as
+        the defects this whole unit exists to stop shipping. os.abort() raises
+        SIGABRT with no unwinding and no chance to flush, which is as close to
+        the SIGTRAP case as can be arranged deliberately.
+        """
+        if os.environ.get("OVERHEARD_DRIVER_ABORT_AFTER") == step_name:
+            os.abort()
+
     def step(self, elapsed, now):
         import rumps
 
@@ -163,6 +176,7 @@ class Driver:
             results["record_button_has_callback"] = button._callback is not None
             results["reached"].append("built")
             _write()
+            self._maybe_abort("built")
 
         elif elapsed >= 1.0 and "record" not in self.done:
             self.done.add("record")
@@ -174,6 +188,7 @@ class Driver:
             app._popover._btn_record.mouseDown_(None)
             results["reached"].append("pressed record")
             _write()
+            self._maybe_abort("pressed record")
 
         elif "record" in self.done and "observe" not in self.done:
             waited = now - self.pressed_at
